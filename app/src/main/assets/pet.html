@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>
+<style>*{margin:0;padding:0}html,body{background:transparent;width:100%;height:100%;overflow:hidden}img{width:100%;height:100%;object-fit:contain}</style>
+</head><body>
+<img id="p" src="clawd-idle.gif">
+<script>
+var states=['idle','thinking','typing','happy','sleeping'];
+function show(s){ if(states.indexOf(s)<0)s='idle'; document.getElementById('p').src='clawd-'+s+'.gif'; }
+window.petEngine={
+  onTap:function(){ show(Math.random()<0.5?'happy':'thinking'); },
+  onDoubleTap:function(){ show('typing'); },
+  onLongPress:function(){ show('sleeping'); }
+};
+var seq=['idle','idle','idle','thinking','typing','happy','idle','sleeping'];
+var i=0;
+setInterval(function(){ show(seq[i%seq.length]); i++; }, 6000);
+show('idle');
+</script>
+</body></html>

@@ -8,6 +8,7 @@ import android.content.Intent;
 import android.graphics.PixelFormat;
 import android.os.Build;
 import android.os.IBinder;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -41,6 +42,11 @@ public class OverlayService extends Service {
     @Override public int onStartCommand(Intent i, int f, int s) { return START_STICKY; }
 
     private void setupOverlay() {
+        // 没有悬浮窗权限时直接退出，避免 addView 抛 SecurityException
+        if (!Settings.canDrawOverlays(this)) {
+            stopSelf();
+            return;
+        }
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         params = new WindowManager.LayoutParams(
             dp(150), dp(185),

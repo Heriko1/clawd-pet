@@ -12,13 +12,20 @@ import android.provider.Settings;
 public class MainActivity extends Activity {
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
-        if (!Settings.canDrawOverlays(this)) {
-            startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())));
-        }
+        // Android 13+ 需要通知权限
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
         }
-        startForegroundService(new Intent(this, OverlayService.class));
-        finish();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (!Settings.canDrawOverlays(this)) {
+            // 还没有悬浮窗权限，跳去授权；用户返回时会再次走到 onResume
+            startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())));
+        } else {
+            startForegroundService(new Intent(this, OverlayService.class));
+            finish();
+        }
     }
 }

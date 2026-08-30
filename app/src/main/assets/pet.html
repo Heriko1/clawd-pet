@@ -5,15 +5,24 @@
 <img id="p" src="clawd-idle.gif">
 <script>
 var states=['idle','thinking','typing','happy','sleeping'];
-function show(s){ if(states.indexOf(s)<0)s='idle'; document.getElementById('p').src='clawd-'+s+'.gif'; }
+var idleTimer=null;
+
+function show(s){
+  if(states.indexOf(s)<0) s='idle';
+  document.getElementById('p').src='clawd-'+s+'.gif';
+  // 非idle状态5秒后自动回idle（点击触发的临时状态）
+  if(idleTimer) clearTimeout(idleTimer);
+  if(s!=='idle' && s!=='sleeping'){
+    idleTimer=setTimeout(function(){ show('idle'); },5000);
+  }
+}
+
 window.petEngine={
   onTap:function(){ show(Math.random()<0.5?'happy':'thinking'); },
   onDoubleTap:function(){ show('typing'); },
   onLongPress:function(){ show('sleeping'); }
 };
-var seq=['idle','idle','idle','thinking','typing','happy','idle','sleeping'];
-var i=0;
-setInterval(function(){ show(seq[i%seq.length]); i++; }, 6000);
+
 show('idle');
 </script>
 </body></html>

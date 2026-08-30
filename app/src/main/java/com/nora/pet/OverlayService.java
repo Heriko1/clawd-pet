@@ -4,10 +4,15 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.PixelFormat;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -20,6 +25,7 @@ import android.webkit.WebViewClient;
 public class OverlayService extends Service {
     private static final String CHANNEL_ID = "pet_channel";
     private static final int NOTIF_ID = 1001;
+    public static final String ACTION_STATE = "com.nora.pet.STATE_CHANGE";
     private WindowManager wm;
     private WebView webView;
     private WindowManager.LayoutParams params;
@@ -27,22 +33,42 @@ public class OverlayService extends Service {
     private float initialTouchX, initialTouchY;
     private long lastTap = 0, touchStart = 0;
     private boolean hasMoved = false;
+    private Handler mainHandler;
+    private BroadcastReceiver stateReceiver;
 
     @Override public IBinder onBind(Intent i) { return null; }
 
     @Override public void onCreate() {
         super.onCreate();
+        mainHandler = new Handler(Looper.getMainLooper());
         NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "Clawd Pet", NotificationManager.IMPORTANCE_LOW);
         ch.setShowBadge(false);
         ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(ch);
         startForeground(NOTIF_ID, buildNotification());
         setupOverlay();
+        registerStateReceiver();
     }
 
     @Override public int onStartCommand(Intent i, int f, int s) { return START_STICKY; }
 
+    private void registerStateReceiver() {
+        stateReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context ctx, Intent intent) {
+                String state = intent.getStringExtra("state");
+                if (state != null && webView != null) {
+                    mainHandler.post(() -> js("show('" + state + "')"));
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter(ACTION_STATE);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(stateReceiver, filter, Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(stateReceiver, filter);
+        }
+    }
+
     private void setupOverlay() {
-        // 没有悬浮窗权限时直接退出，避免 addView 抛 SecurityException
         if (!Settings.canDrawOverlays(this)) {
             stopSelf();
             return;
@@ -109,6 +135,7 @@ public class OverlayService extends Service {
     }
 
     @Override public void onDestroy() {
+        if (stateReceiver != null) { unregisterReceiver(stateReceiver); stateReceiver = null; }
         if (webView != null) { wm.removeView(webView); webView.destroy(); webView = null; }
         super.onDestroy();
     }

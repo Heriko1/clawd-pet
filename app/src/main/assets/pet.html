@@ -4,11 +4,12 @@
 *{margin:0;padding:0}
 html,body{background:transparent;width:100%;height:100%;overflow:hidden;position:relative}
 #pet-container{width:100%;height:100%;position:relative}
-#pet{width:100%;height:100%}
+#pet{width:100%;height:100%;display:flex;align-items:center;justify-content:center}
+#pet svg{width:100%;height:100%}
 #bubble{
   position:absolute;bottom:105%;left:50%;transform:translateX(-50%);
   background:rgba(255,255,255,0.92);border-radius:12px;padding:6px 10px;
-  font-size:11px;font-family:sans-serif;color:#333;white-space:nowrap;
+  font-size:11px;font-family:sans-serif;color:#333;
   opacity:0;transition:opacity 0.3s;pointer-events:none;
   max-width:200px;white-space:normal;text-align:center;
   box-shadow:0 1px 4px rgba(0,0,0,0.15);
@@ -22,7 +23,7 @@ html,body{background:transparent;width:100%;height:100%;overflow:hidden;position
 </head><body>
 <div id="pet-container">
   <div id="bubble"></div>
-  <object id="pet" type="image/svg+xml" data="file:///sdcard/Download/clawd-pet/all-svgs/clawd-mini-idle.svg"></object>
+  <div id="pet"></div>
 </div>
 <script>
 var SVG_BASE = 'file:///sdcard/Download/clawd-pet/all-svgs/';
@@ -82,21 +83,42 @@ var bubbleTimer = null;
 var lonelyMinutes = 0;
 var lonelyTimer = null;
 var lastInteraction = Date.now();
+var svgCache = {};
 
 var IDLE_POOL = ['idle','idle','idle','look','bubble','living','peek','doze'];
 
 var LONELY_STAGES = [
-  {min:5,  state:'peek',     text:null},
-  {min:10, state:'bubble',   text:null},
-  {min:15, state:'reading',  text:null},
-  {min:20, state:'doze',     text:null},
-  {min:30, state:'sleeping', text:null}
+  {min:5,  state:'peek'},
+  {min:10, state:'bubble'},
+  {min:15, state:'reading'},
+  {min:20, state:'doze'},
+  {min:30, state:'sleeping'}
 ];
+
+function loadSVG(state) {
+  var file = STATES[state];
+  if (!file) file = STATES['idle'];
+  if (svgCache[file]) {
+    document.getElementById('pet').innerHTML = svgCache[file];
+    return;
+  }
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', SVG_BASE + file, true);
+  xhr.onload = function() {
+    if (xhr.status === 200 || xhr.status === 0) {
+      svgCache[file] = xhr.responseText;
+      if (currentState === state) {
+        document.getElementById('pet').innerHTML = xhr.responseText;
+      }
+    }
+  };
+  xhr.send();
+}
 
 function show(s) {
   if (!STATES[s]) s = 'idle';
   currentState = s;
-  document.getElementById('pet').data = SVG_BASE + STATES[s];
+  loadSVG(s);
   clearIdleTimer();
   if (s !== 'idle' && s !== 'sleeping' && s !== 'doze' && s !== 'reading'
       && s !== 'thinking' && s !== 'typing' && s !== 'working'
@@ -119,7 +141,7 @@ function scheduleIdleRotation() {
     if (currentState === 'idle' || IDLE_POOL.indexOf(currentState) >= 0) {
       var pick = IDLE_POOL[Math.floor(Math.random() * IDLE_POOL.length)];
       currentState = pick;
-      document.getElementById('pet').data = SVG_BASE + STATES[pick];
+      loadSVG(pick);
       scheduleIdleRotation();
     }
   }, delay);
@@ -148,7 +170,7 @@ function checkLonely() {
     if (lonelyMinutes >= LONELY_STAGES[i].min) {
       if (currentState !== LONELY_STAGES[i].state) {
         currentState = LONELY_STAGES[i].state;
-        document.getElementById('pet').data = SVG_BASE + STATES[LONELY_STAGES[i].state];
+        loadSVG(LONELY_STAGES[i].state);
         clearIdleTimer();
       }
       break;

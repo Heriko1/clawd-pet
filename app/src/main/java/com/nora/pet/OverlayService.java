@@ -109,7 +109,7 @@ public class OverlayService extends Service {
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return; }
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         params = new WindowManager.LayoutParams(
-            dp(160), dp(160),
+            dp(110), dp(130),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT);

@@ -1,28 +1,172 @@
 <!DOCTYPE html>
-<html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>
-<style>*{margin:0;padding:0}html,body{background:transparent;width:100%;height:100%;overflow:hidden}img{width:100%;height:100%;object-fit:contain}</style>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{margin:0;padding:0}
+html,body{background:transparent;width:100%;height:100%;overflow:hidden;position:relative}
+#pet-container{width:100%;height:100%;position:relative}
+#pet{width:100%;height:100%}
+#bubble{
+  position:absolute;bottom:105%;left:50%;transform:translateX(-50%);
+  background:rgba(255,255,255,0.92);border-radius:12px;padding:6px 10px;
+  font-size:11px;font-family:sans-serif;color:#333;white-space:nowrap;
+  opacity:0;transition:opacity 0.3s;pointer-events:none;
+  max-width:200px;white-space:normal;text-align:center;
+  box-shadow:0 1px 4px rgba(0,0,0,0.15);
+}
+#bubble.show{opacity:1}
+#bubble::after{
+  content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);
+  border:5px solid transparent;border-top-color:rgba(255,255,255,0.92);
+}
+</style>
 </head><body>
-<img id="p" src="clawd-idle.gif">
+<div id="pet-container">
+  <div id="bubble"></div>
+  <object id="pet" type="image/svg+xml" data="file:///sdcard/Download/clawd-pet/all-svgs/clawd-mini-idle.svg"></object>
+</div>
 <script>
-var states=['idle','thinking','typing','happy','sleeping'];
-var idleTimer=null;
+var SVG_BASE = 'file:///sdcard/Download/clawd-pet/all-svgs/';
 
-function show(s){
-  if(states.indexOf(s)<0) s='idle';
-  document.getElementById('p').src='clawd-'+s+'.gif';
-  // 非idle状态5秒后自动回idle（点击触发的临时状态）
-  if(idleTimer) clearTimeout(idleTimer);
-  if(s!=='idle' && s!=='sleeping'){
-    idleTimer=setTimeout(function(){ show('idle'); },5000);
+var STATES = {
+  'idle':           'clawd-mini-idle.svg',
+  'typing':         'clawd-mini-typing.svg',
+  'happy':          'clawd-mini-happy.svg',
+  'sleeping':       'clawd-mini-sleep.svg',
+  'enter-sleep':    'clawd-mini-enter-sleep.svg',
+  'alert':          'clawd-mini-alert.svg',
+  'peek':           'clawd-mini-peek.svg',
+  'enter':          'clawd-mini-enter.svg',
+  'crabwalk':       'clawd-mini-crabwalk.svg',
+  'drag':           'clawd-react-drag.svg',
+  'annoyed':        'clawd-react-annoyed.svg',
+  'double-jump':    'clawd-react-double-jump.svg',
+  'react-left':     'clawd-react-left.svg',
+  'react-right':    'clawd-react-right.svg',
+  'react-double':   'clawd-react-double.svg',
+  'bubble':         'clawd-idle-bubble.svg',
+  'look':           'clawd-idle-look.svg',
+  'follow':         'clawd-idle-follow.svg',
+  'living':         'clawd-idle-living.svg',
+  'doze':           'clawd-idle-doze.svg',
+  'reading':        'clawd-idle-reading.svg',
+  'yawn':           'clawd-idle-yawn.svg',
+  'low-battery':    'clawd-idle-low-battery.svg',
+  'idle-collapse':  'clawd-idle-collapse.svg',
+  'thinking':       'clawd-working-thinking.svg',
+  'ultrathink':     'clawd-working-ultrathink.svg',
+  'working':        'clawd-working-typing-boss.svg',
+  'wizard':         'clawd-working-wizard.svg',
+  'building':       'clawd-working-building.svg',
+  'debugger':       'clawd-working-debugger.svg',
+  'juggling':       'clawd-working-juggling.svg',
+  'sweeping':       'clawd-working-sweeping.svg',
+  'carrying':       'clawd-working-carrying.svg',
+  'work-typing':    'clawd-working-typing.svg',
+  'error':          'clawd-error.svg',
+  'coffee':         'clawd-coffee-hand.svg',
+  'coffee-flip':    'clawd-coffee-head-flip.svg',
+  'music':          'clawd-headphones-groove.svg',
+  'dizzy':          'clawd-dizzy.svg',
+  'shy':            'clawd-aegyo-shy.svg',
+  'wake':           'clawd-wake.svg',
+  'notification':   'clawd-notification.svg',
+  'collapse-sleep': 'clawd-collapse-sleep.svg',
+  'about':          'clawd-about-hero.svg',
+  'outlaw':         'clawd-outlaw-bender.svg',
+  'static':         'clawd-static-base.svg'
+};
+
+var currentState = 'idle';
+var idleTimer = null;
+var bubbleTimer = null;
+var lonelyMinutes = 0;
+var lonelyTimer = null;
+var lastInteraction = Date.now();
+
+var IDLE_POOL = ['idle','idle','idle','look','bubble','living','peek','doze'];
+
+var LONELY_STAGES = [
+  {min:5,  state:'peek',     text:null},
+  {min:10, state:'bubble',   text:null},
+  {min:15, state:'reading',  text:null},
+  {min:20, state:'doze',     text:null},
+  {min:30, state:'sleeping', text:null}
+];
+
+function show(s) {
+  if (!STATES[s]) s = 'idle';
+  currentState = s;
+  document.getElementById('pet').data = SVG_BASE + STATES[s];
+  clearIdleTimer();
+  if (s !== 'idle' && s !== 'sleeping' && s !== 'doze' && s !== 'reading'
+      && s !== 'thinking' && s !== 'typing' && s !== 'working'
+      && s !== 'building' && s !== 'debugger' && s !== 'drag'
+      && s !== 'ultrathink' && s !== 'wizard' && s !== 'work-typing') {
+    idleTimer = setTimeout(function(){ show('idle'); }, 5000);
+  }
+  if (s === 'idle') { scheduleIdleRotation(); }
+  if (['peek','bubble','reading','doze','sleeping'].indexOf(s) < 0) { resetLonely(); }
+}
+
+function clearIdleTimer() {
+  if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+}
+
+function scheduleIdleRotation() {
+  clearIdleTimer();
+  var delay = 25000 + Math.floor(Math.random() * 20000);
+  idleTimer = setTimeout(function() {
+    if (currentState === 'idle' || IDLE_POOL.indexOf(currentState) >= 0) {
+      var pick = IDLE_POOL[Math.floor(Math.random() * IDLE_POOL.length)];
+      currentState = pick;
+      document.getElementById('pet').data = SVG_BASE + STATES[pick];
+      scheduleIdleRotation();
+    }
+  }, delay);
+}
+
+function showBubble(text, duration) {
+  var el = document.getElementById('bubble');
+  el.textContent = text;
+  el.className = 'show';
+  if (bubbleTimer) clearTimeout(bubbleTimer);
+  bubbleTimer = setTimeout(function() { el.className = ''; bubbleTimer = null; }, duration || 4000);
+}
+
+function hideBubble() {
+  document.getElementById('bubble').className = '';
+  if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+}
+
+function resetLonely() { lonelyMinutes = 0; lastInteraction = Date.now(); }
+
+function checkLonely() {
+  lonelyMinutes = Math.floor((Date.now() - lastInteraction) / 60000);
+  if (['thinking','typing','working','building','debugger','drag',
+       'ultrathink','wizard','work-typing'].indexOf(currentState) >= 0) return;
+  for (var i = LONELY_STAGES.length - 1; i >= 0; i--) {
+    if (lonelyMinutes >= LONELY_STAGES[i].min) {
+      if (currentState !== LONELY_STAGES[i].state) {
+        currentState = LONELY_STAGES[i].state;
+        document.getElementById('pet').data = SVG_BASE + STATES[LONELY_STAGES[i].state];
+        clearIdleTimer();
+      }
+      break;
+    }
   }
 }
 
-window.petEngine={
-  onTap:function(){ show(Math.random()<0.5?'happy':'thinking'); },
-  onDoubleTap:function(){ show('typing'); },
-  onLongPress:function(){ show('sleeping'); }
+lonelyTimer = setInterval(checkLonely, 60000);
+
+window.petEngine = {
+  onTap: function() { resetLonely(); var r=['happy','alert','shy','peek']; show(r[Math.floor(Math.random()*r.length)]); },
+  onDoubleTap: function() { resetLonely(); show('double-jump'); },
+  onLongPress: function() { resetLonely(); show('collapse-sleep'); },
+  onDragStart: function() { resetLonely(); show('drag'); },
+  onDragEnd: function() { show('dizzy'); setTimeout(function(){ show('idle'); }, 2000); }
 };
 
-show('idle');
+show('enter');
+setTimeout(function(){ show('idle'); }, 2000);
 </script>
 </body></html>

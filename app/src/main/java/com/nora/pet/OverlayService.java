@@ -18,6 +18,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -124,6 +125,7 @@ public class OverlayService extends Service {
         s.setAllowFileAccessFromFileURLs(true);
         s.setAllowUniversalAccessFromFileURLs(true);
         webView.setWebViewClient(new WebViewClient());
+        webView.addJavascriptInterface(new AndroidBridge(), "Android");
         String petHtml = "file://" + PET_DIR + "pet.html";
         File f = new File(PET_DIR + "pet.html");
         if (f.exists()) {
@@ -168,6 +170,20 @@ public class OverlayService extends Service {
             }
         });
         wm.addView(webView, params);
+    }
+
+    // JS -> 原生：调整悬浮窗尺寸（动态窗口）
+    private class AndroidBridge {
+        @JavascriptInterface
+        public void resize(int w, int h) {
+            mainHandler.post(() -> {
+                if (params != null && webView != null) {
+                    params.width = dp(w);
+                    params.height = dp(h);
+                    wm.updateViewLayout(webView, params);
+                }
+            });
+        }
     }
 
     private void startWhisperRotation() {

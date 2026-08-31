@@ -109,9 +109,9 @@ public class OverlayService extends Service {
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return; }
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         params = new WindowManager.LayoutParams(
-            dp(150), dp(185),
+            dp(115), dp(145),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.START;
         params.x = 20; params.y = 220;
@@ -124,13 +124,11 @@ public class OverlayService extends Service {
         s.setAllowFileAccessFromFileURLs(true);
         s.setAllowUniversalAccessFromFileURLs(true);
         webView.setWebViewClient(new WebViewClient());
-        // Load pet.html from sdcard so XHR to sibling SVGs is same-origin
         String petHtml = "file://" + PET_DIR + "pet.html";
         File f = new File(PET_DIR + "pet.html");
         if (f.exists()) {
             webView.loadUrl(petHtml);
         } else {
-            // Fallback to bundled asset
             webView.loadUrl("file:///android_asset/pet.html");
         }
         webView.setOnTouchListener(new View.OnTouchListener() {

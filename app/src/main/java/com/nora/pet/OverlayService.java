@@ -18,7 +18,6 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
-import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -33,6 +32,11 @@ public class OverlayService extends Service {
     private static final long WHISPER_INTERVAL = 3600_000L;
     private static final String PET_DIR = "/sdcard/Download/clawd-pet/";
 
+    // WebView size stays large for rendering, hitbox is smaller
+    private static final int VIEW_W_DP = 150;
+    private static final int VIEW_H_DP = 185;
+    private static final int HITBOX_MARGIN_DP = 25; // ignore touches in outer 25dp margin
+
     private WindowManager wm;
     private WebView webView;
     private WindowManager.LayoutParams params;
@@ -41,6 +45,7 @@ public class OverlayService extends Service {
     private long lastTap = 0, touchStart = 0;
     private boolean hasMoved = false;
     private boolean isDragging = false;
+    private int hitboxMarginPx;
     private Handler mainHandler;
     private BroadcastReceiver stateReceiver;
     private Random random = new Random();
@@ -70,6 +75,7 @@ public class OverlayService extends Service {
     @Override public void onCreate() {
         super.onCreate();
         mainHandler = new Handler(Looper.getMainLooper());
+        hitboxMarginPx = dp(HITBOX_MARGIN_DP);
         NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "Clawd Pet", NotificationManager.IMPORTANCE_LOW);
         ch.setShowBadge(false);
         ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(ch);
@@ -105,14 +111,23 @@ public class OverlayService extends Service {
         }
     }
 
+    private boolean inHitbox(MotionEvent e) {
+        float x = e.getX();
+        float y = e.getY();
+        int w = webView.getWidth();
+        int h = webView.getHeight();
+        return x >= hitboxMarginPx && x <= w - hitboxMarginPx
+            && y >= hitboxMarginPx && y <= h - hitboxMarginPx;
+    }
+
     @SuppressWarnings("deprecation")
     private void setupOverlay() {
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return; }
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         params = new WindowManager.LayoutParams(
-            dp(150), dp(185),
+            dp(VIEW_W_DP), dp(VIEW_H_DP),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.START;
         params.x = 20; params.y = 220;
@@ -125,7 +140,6 @@ public class OverlayService extends Service {
         s.setAllowFileAccessFromFileURLs(true);
         s.setAllowUniversalAccessFromFileURLs(true);
         webView.setWebViewClient(new WebViewClient());
-        webView.addJavascriptInterface(new AndroidBridge(), "Android");
         String petHtml = "file://" + PET_DIR + "pet.html";
         File f = new File(PET_DIR + "pet.html");
         if (f.exists()) {
@@ -137,6 +151,7 @@ public class OverlayService extends Service {
             @Override public boolean onTouch(View v, MotionEvent e) {
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
+                        if (!inHitbox(e)) return false; // pass through
                         initialX = params.x; initialY = params.y;
                         initialTouchX = e.getRawX(); initialTouchY = e.getRawY();
                         touchStart = System.currentTimeMillis();
@@ -170,19 +185,6 @@ public class OverlayService extends Service {
             }
         });
         wm.addView(webView, params);
-    }
-
-    private class AndroidBridge {
-        @JavascriptInterface
-        public void resize(int w, int h) {
-            mainHandler.post(() -> {
-                if (params != null && webView != null) {
-                    params.width = dp(w);
-                    params.height = dp(h);
-                    wm.updateViewLayout(webView, params);
-                }
-            });
-        }
     }
 
     private void startWhisperRotation() {

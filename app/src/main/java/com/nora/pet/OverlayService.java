@@ -21,6 +21,7 @@ import android.view.WindowManager;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import java.io.File;
 import java.util.Calendar;
 import java.util.Random;
 
@@ -29,6 +30,7 @@ public class OverlayService extends Service {
     private static final int NOTIF_ID = 1001;
     public static final String ACTION_STATE = "com.nora.pet.STATE_CHANGE";
     private static final long WHISPER_INTERVAL = 3600_000L;
+    private static final String PET_DIR = "/sdcard/Download/clawd-pet/";
 
     private WindowManager wm;
     private WebView webView;
@@ -122,7 +124,15 @@ public class OverlayService extends Service {
         s.setAllowFileAccessFromFileURLs(true);
         s.setAllowUniversalAccessFromFileURLs(true);
         webView.setWebViewClient(new WebViewClient());
-        webView.loadUrl("file:///android_asset/pet.html");
+        // Load pet.html from sdcard so XHR to sibling SVGs is same-origin
+        String petHtml = "file://" + PET_DIR + "pet.html";
+        File f = new File(PET_DIR + "pet.html");
+        if (f.exists()) {
+            webView.loadUrl(petHtml);
+        } else {
+            // Fallback to bundled asset
+            webView.loadUrl("file:///android_asset/pet.html");
+        }
         webView.setOnTouchListener(new View.OnTouchListener() {
             @Override public boolean onTouch(View v, MotionEvent e) {
                 switch (e.getActionMasked()) {

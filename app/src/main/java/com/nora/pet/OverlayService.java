@@ -110,7 +110,7 @@ public class OverlayService extends Service {
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return; }
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         params = new WindowManager.LayoutParams(
-            dp(110), dp(130),
+            dp(150), dp(185),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT);
@@ -172,7 +172,6 @@ public class OverlayService extends Service {
         wm.addView(webView, params);
     }
 
-    // JS -> 原生：调整悬浮窗尺寸（动态窗口）
     private class AndroidBridge {
         @JavascriptInterface
         public void resize(int w, int h) {

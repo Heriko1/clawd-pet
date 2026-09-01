@@ -34,16 +34,12 @@ public class OverlayService extends Service {
     private static final String PET_DIR = "/sdcard/Download/clawd-pet/";
 
     // Full window: room for jump animations, bubbles, entrance
-    private static final int FULL_W_DP = 150;
+    private static final int VIEW_W_DP = 150;
     private static final int FULL_H_DP = 185;
-    // Compact window: tight around crab body, minimal touch blocking
-    private static final int COMPACT_W_DP = 90;
-    private static final int COMPACT_H_DP = 100;
-    // Position offset when switching: keeps crab body at same screen position
-    // Crab center in full: (75, 120)dp from window origin
-    // Crab center in compact with CSS scale: (45, 65)dp from window origin
-    private static final int RESIZE_DX_DP = 30;   // 75 - 45
-    private static final int RESIZE_DY_DP = 55;   // 120 - 65
+    // Compact: same width, shorter height (cuts empty space above crab)
+    private static final int COMPACT_H_DP = 110;
+    // Y shift = height difference, keeps crab's bottom edge at same screen position
+    private static final int RESIZE_DY_DP = 75;  // 185 - 110
 
     private WindowManager wm;
     private WebView webView;
@@ -90,16 +86,10 @@ public class OverlayService extends Service {
         if (full == isFullSize || webView == null || params == null) return;
         isFullSize = full;
         if (full) {
-            // Expand: shift window up-left so crab stays in place
-            params.width = dp(FULL_W_DP);
             params.height = dp(FULL_H_DP);
-            params.x -= dp(RESIZE_DX_DP);
             params.y -= dp(RESIZE_DY_DP);
         } else {
-            // Compact: shift window down-right
-            params.width = dp(COMPACT_W_DP);
             params.height = dp(COMPACT_H_DP);
-            params.x += dp(RESIZE_DX_DP);
             params.y += dp(RESIZE_DY_DP);
         }
         try { wm.updateViewLayout(webView, params); } catch (Exception e) {}
@@ -152,7 +142,7 @@ public class OverlayService extends Service {
 
         // Start full size for entrance animation
         params = new WindowManager.LayoutParams(
-            dp(FULL_W_DP), dp(FULL_H_DP),
+            dp(VIEW_W_DP), dp(FULL_H_DP),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,

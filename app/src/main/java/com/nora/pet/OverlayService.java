@@ -18,6 +18,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -32,24 +33,27 @@ public class OverlayService extends Service {
     private static final long WHISPER_INTERVAL = 3600_000L;
     private static final String PET_DIR = "/sdcard/Download/clawd-pet/";
 
-    private static final int VIEW_W_DP = 150;
-    private static final int VIEW_H_DP = 185;
-    private static final int TOUCH_W_DP = 65;
-    private static final int TOUCH_H_DP = 55;
-    private static final int TOUCH_OFFSET_X_DP = 42;
-    private static final int TOUCH_OFFSET_Y_DP = 90;
+    // Full window: room for jump animations, bubbles, entrance
+    private static final int FULL_W_DP = 150;
+    private static final int FULL_H_DP = 185;
+    // Compact window: tight around crab body, minimal touch blocking
+    private static final int COMPACT_W_DP = 90;
+    private static final int COMPACT_H_DP = 100;
+    // Position offset when switching: keeps crab body at same screen position
+    // Crab center in full: (75, 120)dp from window origin
+    // Crab center in compact with CSS scale: (45, 65)dp from window origin
+    private static final int RESIZE_DX_DP = 30;   // 75 - 45
+    private static final int RESIZE_DY_DP = 55;   // 120 - 65
 
     private WindowManager wm;
     private WebView webView;
-    private View touchView;
-    private WindowManager.LayoutParams webParams;
-    private WindowManager.LayoutParams touchParams;
+    private WindowManager.LayoutParams params;
     private int initialX, initialY;
     private float initialTouchX, initialTouchY;
     private long lastTap = 0, touchStart = 0;
     private boolean hasMoved = false;
     private boolean isDragging = false;
-    private int touchOffsetXPx, touchOffsetYPx;
+    private boolean isFullSize = true;
     private Handler mainHandler;
     private BroadcastReceiver stateReceiver;
     private Random random = new Random();
@@ -74,13 +78,38 @@ public class OverlayService extends Service {
         "\u4e2d\u5348\u4e86\u54e6"
     };
 
+    // --- JS Bridge ---
+    private class PetBridge {
+        @JavascriptInterface
+        public void requestResize(boolean full) {
+            mainHandler.post(() -> doResize(full));
+        }
+    }
+
+    private void doResize(boolean full) {
+        if (full == isFullSize || webView == null || params == null) return;
+        isFullSize = full;
+        if (full) {
+            // Expand: shift window up-left so crab stays in place
+            params.width = dp(FULL_W_DP);
+            params.height = dp(FULL_H_DP);
+            params.x -= dp(RESIZE_DX_DP);
+            params.y -= dp(RESIZE_DY_DP);
+        } else {
+            // Compact: shift window down-right
+            params.width = dp(COMPACT_W_DP);
+            params.height = dp(COMPACT_H_DP);
+            params.x += dp(RESIZE_DX_DP);
+            params.y += dp(RESIZE_DY_DP);
+        }
+        try { wm.updateViewLayout(webView, params); } catch (Exception e) {}
+    }
+
     @Override public IBinder onBind(Intent i) { return null; }
 
     @Override public void onCreate() {
         super.onCreate();
         mainHandler = new Handler(Looper.getMainLooper());
-        touchOffsetXPx = dp(TOUCH_OFFSET_X_DP);
-        touchOffsetYPx = dp(TOUCH_OFFSET_Y_DP);
         NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "Clawd Pet", NotificationManager.IMPORTANCE_LOW);
         ch.setShowBadge(false);
         ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(ch);
@@ -121,25 +150,40 @@ public class OverlayService extends Service {
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return; }
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
 
-        int startX = 20, startY = 220;
-
-        // --- Layer 1 (bottom): Touch receiver ---
-        touchParams = new WindowManager.LayoutParams(
-            dp(TOUCH_W_DP), dp(TOUCH_H_DP),
+        // Start full size for entrance animation
+        params = new WindowManager.LayoutParams(
+            dp(FULL_W_DP), dp(FULL_H_DP),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSPARENT);
-        touchParams.gravity = Gravity.TOP | Gravity.START;
-        touchParams.x = startX + touchOffsetXPx;
-        touchParams.y = startY + touchOffsetYPx;
+            PixelFormat.TRANSLUCENT);
+        params.gravity = Gravity.TOP | Gravity.START;
+        params.x = 20; params.y = 220;
+        isFullSize = true;
 
-        touchView = new View(this);
-        touchView.setOnTouchListener((v, e) -> {
+        webView = new WebView(this);
+        webView.setBackgroundColor(0x00000000);
+        WebSettings s = webView.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setAllowFileAccess(true);
+        s.setAllowFileAccessFromFileURLs(true);
+        s.setAllowUniversalAccessFromFileURLs(true);
+        webView.setWebViewClient(new WebViewClient());
+        webView.addJavascriptInterface(new PetBridge(), "Android");
+
+        File f = new File(PET_DIR + "pet.html");
+        if (f.exists()) {
+            webView.loadUrl("file://" + PET_DIR + "pet.html");
+        } else {
+            webView.loadUrl("file:///android_asset/pet.html");
+        }
+
+        webView.setOnTouchListener((v, e) -> {
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
-                    initialX = touchParams.x;
-                    initialY = touchParams.y;
+                    initialX = params.x;
+                    initialY = params.y;
                     initialTouchX = e.getRawX();
                     initialTouchY = e.getRawY();
                     touchStart = System.currentTimeMillis();
@@ -155,12 +199,9 @@ public class OverlayService extends Service {
                             isDragging = true;
                             js("window.petEngine && petEngine.onDragStart()");
                         }
-                        touchParams.x = initialX + dx;
-                        touchParams.y = initialY + dy;
-                        webParams.x = touchParams.x - touchOffsetXPx;
-                        webParams.y = touchParams.y - touchOffsetYPx;
-                        wm.updateViewLayout(touchView, touchParams);
-                        wm.updateViewLayout(webView, webParams);
+                        params.x = initialX + dx;
+                        params.y = initialY + dy;
+                        wm.updateViewLayout(webView, params);
                     }
                     return true;
                 case MotionEvent.ACTION_UP:
@@ -183,38 +224,7 @@ public class OverlayService extends Service {
                     return false;
             }
         });
-        wm.addView(touchView, touchParams);
-
-        // --- Layer 2 (top): WebView render only, NOT_TOUCHABLE ---
-        webParams = new WindowManager.LayoutParams(
-            dp(VIEW_W_DP), dp(VIEW_H_DP),
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT);
-        webParams.gravity = Gravity.TOP | Gravity.START;
-        webParams.x = startX;
-        webParams.y = startY;
-        webParams.alpha = 1.0f;  // force full opacity
-
-        webView = new WebView(this);
-        webView.setBackgroundColor(0x00000000);
-        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);  // force hardware rendering
-        WebSettings s = webView.getSettings();
-        s.setJavaScriptEnabled(true);
-        s.setDomStorageEnabled(true);
-        s.setAllowFileAccess(true);
-        s.setAllowFileAccessFromFileURLs(true);
-        s.setAllowUniversalAccessFromFileURLs(true);
-        webView.setWebViewClient(new WebViewClient());
-        File f = new File(PET_DIR + "pet.html");
-        if (f.exists()) {
-            webView.loadUrl("file://" + PET_DIR + "pet.html");
-        } else {
-            webView.loadUrl("file:///android_asset/pet.html");
-        }
-        wm.addView(webView, webParams);
+        wm.addView(webView, params);
     }
 
     private void startWhisperRotation() {
@@ -254,7 +264,6 @@ public class OverlayService extends Service {
         if (whisperRunnable != null) mainHandler.removeCallbacks(whisperRunnable);
         if (stateReceiver != null) { unregisterReceiver(stateReceiver); stateReceiver = null; }
         if (webView != null) { wm.removeView(webView); webView.destroy(); webView = null; }
-        if (touchView != null) { wm.removeView(touchView); touchView = null; }
         super.onDestroy();
     }
 }

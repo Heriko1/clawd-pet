@@ -34,12 +34,14 @@ public class OverlayService extends Service {
     private static final String PET_DIR = "/sdcard/Download/clawd-pet/";
 
     // Full window: room for jump animations, bubbles, entrance
-    private static final int VIEW_W_DP = 150;
+    private static final int FULL_W_DP = 150;
     private static final int FULL_H_DP = 185;
-    // Compact: same width, shorter height (cuts empty space above crab)
+    // Compact: tight around crab body
+    private static final int COMPACT_W_DP = 100;
     private static final int COMPACT_H_DP = 110;
-    // Y shift = height difference, keeps crab's bottom edge at same screen position
-    private static final int RESIZE_DY_DP = 75;  // 185 - 110
+    // Position offsets to keep crab centered on screen when resizing
+    private static final int RESIZE_DX_DP = 25;  // (150-100)/2
+    private static final int RESIZE_DY_DP = 75;  // 185-110
 
     private WindowManager wm;
     private WebView webView;
@@ -86,10 +88,14 @@ public class OverlayService extends Service {
         if (full == isFullSize || webView == null || params == null) return;
         isFullSize = full;
         if (full) {
+            params.width = dp(FULL_W_DP);
             params.height = dp(FULL_H_DP);
+            params.x -= dp(RESIZE_DX_DP);
             params.y -= dp(RESIZE_DY_DP);
         } else {
+            params.width = dp(COMPACT_W_DP);
             params.height = dp(COMPACT_H_DP);
+            params.x += dp(RESIZE_DX_DP);
             params.y += dp(RESIZE_DY_DP);
         }
         try { wm.updateViewLayout(webView, params); } catch (Exception e) {}
@@ -142,7 +148,7 @@ public class OverlayService extends Service {
 
         // Start full size for entrance animation
         params = new WindowManager.LayoutParams(
-            dp(VIEW_W_DP), dp(FULL_H_DP),
+            dp(FULL_W_DP), dp(FULL_H_DP),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,

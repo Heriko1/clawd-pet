@@ -8,17 +8,17 @@ html,body{background:transparent;width:100%;height:100%;overflow:hidden;position
 #pet svg{width:100%;height:100%}
 #bubble{
   position:absolute;top:2px;left:50%;transform:translateX(-50%);
-  background:rgba(255,255,255,0.92);border-radius:12px;padding:6px 10px;
-  font-size:11px;font-family:sans-serif;color:#333;
+  background:rgba(255,255,255,0.95);border-radius:12px;padding:6px 10px;
+  font-size:12px;font-family:sans-serif;color:#333;
   opacity:0;transition:opacity 0.3s;pointer-events:none;
   max-width:130px;white-space:normal;text-align:center;
-  box-shadow:0 1px 4px rgba(0,0,0,0.15);
-  z-index:10;
+  box-shadow:0 2px 6px rgba(0,0,0,0.2);
+  z-index:999;
 }
 #bubble.show{opacity:1}
 #bubble::after{
   content:'';position:absolute;bottom:-9px;left:50%;transform:translateX(-50%);
-  border:5px solid transparent;border-top-color:rgba(255,255,255,0.92);
+  border:5px solid transparent;border-top-color:rgba(255,255,255,0.95);
 }
 </style>
 </head><body>
@@ -96,7 +96,7 @@ var LONELY_STAGES = [
   {min:30, state:'sleeping'}
 ];
 
-/* ---------- 碎碎念词池 ---------- */
+/* ---------- whisper pools ---------- */
 var BUBBLE_GENERAL = [
   '在看你…', '…', '(*´-`)', '想戳一下吗',
   '蹲着呢', '有点无聊', '你在干嘛', '嗯？',
@@ -130,7 +130,7 @@ function getBubblePool() {
 var whisperTimer = null;
 function scheduleWhisper() {
   if (whisperTimer) clearTimeout(whisperTimer);
-  var delay = 30 * 1000; // TEST: 30s for debugging
+  var delay = 30 * 1000; // TEST
   whisperTimer = setTimeout(function() {
     if (WORKING_STATES.indexOf(currentState) < 0) {
       var pool = getBubblePool();
@@ -240,5 +240,8 @@ window.petEngine = {
 show('enter');
 setTimeout(function(){ show('idle'); }, 2000);
 scheduleWhisper();
+
+// TEST: show bubble immediately on load
+setTimeout(function() { showBubble('TEST BUBBLE'); }, 3000);
 </script>
 </body></html>

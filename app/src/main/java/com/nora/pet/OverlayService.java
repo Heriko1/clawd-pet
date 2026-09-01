@@ -32,15 +32,15 @@ public class OverlayService extends Service {
     private static final long WHISPER_INTERVAL = 3600_000L;
     private static final String PET_DIR = "/sdcard/Download/clawd-pet/";
 
-    // Layer 1: WebView renders full size, FLAG_NOT_TOUCHABLE
+    // Layer 2 (top): WebView renders full size, FLAG_NOT_TOUCHABLE
     private static final int VIEW_W_DP = 150;
     private static final int VIEW_H_DP = 185;
-    // Layer 2: small transparent touch receiver on crab body
-    private static final int TOUCH_W_DP = 80;
-    private static final int TOUCH_H_DP = 70;
-    // Offset: crab body sits in the lower-center of the SVG
-    private static final int TOUCH_OFFSET_X_DP = 35;  // (150-80)/2
-    private static final int TOUCH_OFFSET_Y_DP = 80;  // push well below top decorations
+    // Layer 1 (bottom): small touch receiver on crab body
+    private static final int TOUCH_W_DP = 65;
+    private static final int TOUCH_H_DP = 55;
+    // Offset from WebView origin to crab body center
+    private static final int TOUCH_OFFSET_X_DP = 42;  // (150-65)/2 ~ center
+    private static final int TOUCH_OFFSET_Y_DP = 90;   // crab body is in the lower portion
 
     private WindowManager wm;
     private WebView webView;
@@ -126,48 +126,18 @@ public class OverlayService extends Service {
 
         int startX = 20, startY = 220;
 
-        // --- Layer 1: WebView (render only, not touchable) ---
-        webParams = new WindowManager.LayoutParams(
-            dp(VIEW_W_DP), dp(VIEW_H_DP),
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT);
-        webParams.gravity = Gravity.TOP | Gravity.START;
-        webParams.x = startX;
-        webParams.y = startY;
-
-        webView = new WebView(this);
-        webView.setBackgroundColor(0x00000000);
-        WebSettings s = webView.getSettings();
-        s.setJavaScriptEnabled(true);
-        s.setDomStorageEnabled(true);
-        s.setAllowFileAccess(true);
-        s.setAllowFileAccessFromFileURLs(true);
-        s.setAllowUniversalAccessFromFileURLs(true);
-        webView.setWebViewClient(new WebViewClient());
-        File f = new File(PET_DIR + "pet.html");
-        if (f.exists()) {
-            webView.loadUrl("file://" + PET_DIR + "pet.html");
-        } else {
-            webView.loadUrl("file:///android_asset/pet.html");
-        }
-        wm.addView(webView, webParams);
-
-        // --- Layer 2: Touch receiver (fully transparent, small) ---
+        // --- Layer 1 (added first = bottom): Touch receiver ---
         touchParams = new WindowManager.LayoutParams(
             dp(TOUCH_W_DP), dp(TOUCH_H_DP),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSPARENT);  // TRANSPARENT not TRANSLUCENT - avoids alpha blending
+            PixelFormat.TRANSPARENT);
         touchParams.gravity = Gravity.TOP | Gravity.START;
         touchParams.x = startX + touchOffsetXPx;
         touchParams.y = startY + touchOffsetYPx;
 
         touchView = new View(this);
-        // No background at all - fully invisible to compositor
         touchView.setOnTouchListener((v, e) -> {
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
@@ -217,6 +187,35 @@ public class OverlayService extends Service {
             }
         });
         wm.addView(touchView, touchParams);
+
+        // --- Layer 2 (added second = top): WebView render only ---
+        webParams = new WindowManager.LayoutParams(
+            dp(VIEW_W_DP), dp(VIEW_H_DP),
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT);
+        webParams.gravity = Gravity.TOP | Gravity.START;
+        webParams.x = startX;
+        webParams.y = startY;
+
+        webView = new WebView(this);
+        webView.setBackgroundColor(0x00000000);
+        WebSettings s = webView.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setAllowFileAccess(true);
+        s.setAllowFileAccessFromFileURLs(true);
+        s.setAllowUniversalAccessFromFileURLs(true);
+        webView.setWebViewClient(new WebViewClient());
+        File f = new File(PET_DIR + "pet.html");
+        if (f.exists()) {
+            webView.loadUrl("file://" + PET_DIR + "pet.html");
+        } else {
+            webView.loadUrl("file:///android_asset/pet.html");
+        }
+        wm.addView(webView, webParams);
     }
 
     private void startWhisperRotation() {
@@ -255,8 +254,8 @@ public class OverlayService extends Service {
     @Override public void onDestroy() {
         if (whisperRunnable != null) mainHandler.removeCallbacks(whisperRunnable);
         if (stateReceiver != null) { unregisterReceiver(stateReceiver); stateReceiver = null; }
-        if (touchView != null) { wm.removeView(touchView); touchView = null; }
         if (webView != null) { wm.removeView(webView); webView.destroy(); webView = null; }
+        if (touchView != null) { wm.removeView(touchView); touchView = null; }
         super.onDestroy();
     }
 }

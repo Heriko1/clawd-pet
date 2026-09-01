@@ -32,20 +32,27 @@ public class OverlayService extends Service {
     private static final long WHISPER_INTERVAL = 3600_000L;
     private static final String PET_DIR = "/sdcard/Download/clawd-pet/";
 
-    // WebView size stays large for rendering, hitbox is smaller
+    // Layer 1: WebView renders full size, FLAG_NOT_TOUCHABLE
     private static final int VIEW_W_DP = 150;
     private static final int VIEW_H_DP = 185;
-    private static final int HITBOX_MARGIN_DP = 25; // ignore touches in outer 25dp margin
+    // Layer 2: small transparent touch receiver centered on crab body
+    private static final int TOUCH_W_DP = 80;
+    private static final int TOUCH_H_DP = 90;
+    // Offset from WebView origin to center touch on crab
+    private static final int TOUCH_OFFSET_X_DP = 35;  // (150-80)/2
+    private static final int TOUCH_OFFSET_Y_DP = 57;  // (185-90)/2 + 10, crab sits lower
 
     private WindowManager wm;
     private WebView webView;
-    private WindowManager.LayoutParams params;
+    private View touchView;
+    private WindowManager.LayoutParams webParams;
+    private WindowManager.LayoutParams touchParams;
     private int initialX, initialY;
     private float initialTouchX, initialTouchY;
     private long lastTap = 0, touchStart = 0;
     private boolean hasMoved = false;
     private boolean isDragging = false;
-    private int hitboxMarginPx;
+    private int touchOffsetXPx, touchOffsetYPx;
     private Handler mainHandler;
     private BroadcastReceiver stateReceiver;
     private Random random = new Random();
@@ -75,7 +82,8 @@ public class OverlayService extends Service {
     @Override public void onCreate() {
         super.onCreate();
         mainHandler = new Handler(Looper.getMainLooper());
-        hitboxMarginPx = dp(HITBOX_MARGIN_DP);
+        touchOffsetXPx = dp(TOUCH_OFFSET_X_DP);
+        touchOffsetYPx = dp(TOUCH_OFFSET_Y_DP);
         NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "Clawd Pet", NotificationManager.IMPORTANCE_LOW);
         ch.setShowBadge(false);
         ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(ch);
@@ -111,26 +119,25 @@ public class OverlayService extends Service {
         }
     }
 
-    private boolean inHitbox(MotionEvent e) {
-        float x = e.getX();
-        float y = e.getY();
-        int w = webView.getWidth();
-        int h = webView.getHeight();
-        return x >= hitboxMarginPx && x <= w - hitboxMarginPx
-            && y >= hitboxMarginPx && y <= h - hitboxMarginPx;
-    }
-
     @SuppressWarnings("deprecation")
     private void setupOverlay() {
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return; }
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
-        params = new WindowManager.LayoutParams(
+
+        int startX = 20, startY = 220;
+
+        // --- Layer 1: WebView (render only, not touchable) ---
+        webParams = new WindowManager.LayoutParams(
             dp(VIEW_W_DP), dp(VIEW_H_DP),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT);
-        params.gravity = Gravity.TOP | Gravity.START;
-        params.x = 20; params.y = 220;
+        webParams.gravity = Gravity.TOP | Gravity.START;
+        webParams.x = startX;
+        webParams.y = startY;
+
         webView = new WebView(this);
         webView.setBackgroundColor(0x00000000);
         WebSettings s = webView.getSettings();
@@ -140,51 +147,76 @@ public class OverlayService extends Service {
         s.setAllowFileAccessFromFileURLs(true);
         s.setAllowUniversalAccessFromFileURLs(true);
         webView.setWebViewClient(new WebViewClient());
-        String petHtml = "file://" + PET_DIR + "pet.html";
         File f = new File(PET_DIR + "pet.html");
         if (f.exists()) {
-            webView.loadUrl(petHtml);
+            webView.loadUrl("file://" + PET_DIR + "pet.html");
         } else {
             webView.loadUrl("file:///android_asset/pet.html");
         }
-        webView.setOnTouchListener(new View.OnTouchListener() {
-            @Override public boolean onTouch(View v, MotionEvent e) {
-                switch (e.getActionMasked()) {
-                    case MotionEvent.ACTION_DOWN:
-                        if (!inHitbox(e)) return false; // pass through
-                        initialX = params.x; initialY = params.y;
-                        initialTouchX = e.getRawX(); initialTouchY = e.getRawY();
-                        touchStart = System.currentTimeMillis();
-                        hasMoved = false; isDragging = false;
-                        return true;
-                    case MotionEvent.ACTION_MOVE:
-                        int dx = (int)(e.getRawX() - initialTouchX);
-                        int dy = (int)(e.getRawY() - initialTouchY);
-                        if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
-                            if (!hasMoved) {
-                                hasMoved = true; isDragging = true;
-                                js("window.petEngine && petEngine.onDragStart()");
-                            }
-                            params.x = initialX + dx; params.y = initialY + dy;
-                            wm.updateViewLayout(webView, params);
-                        }
-                        return true;
-                    case MotionEvent.ACTION_UP:
-                        long elapsed = System.currentTimeMillis() - touchStart;
+        wm.addView(webView, webParams);
+
+        // --- Layer 2: Touch receiver (transparent, small) ---
+        touchParams = new WindowManager.LayoutParams(
+            dp(TOUCH_W_DP), dp(TOUCH_H_DP),
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT);
+        touchParams.gravity = Gravity.TOP | Gravity.START;
+        touchParams.x = startX + touchOffsetXPx;
+        touchParams.y = startY + touchOffsetYPx;
+
+        touchView = new View(this);
+        touchView.setBackgroundColor(0x00000000);
+        touchView.setOnTouchListener((v, e) -> {
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    initialX = touchParams.x;
+                    initialY = touchParams.y;
+                    initialTouchX = e.getRawX();
+                    initialTouchY = e.getRawY();
+                    touchStart = System.currentTimeMillis();
+                    hasMoved = false;
+                    isDragging = false;
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    int dx = (int)(e.getRawX() - initialTouchX);
+                    int dy = (int)(e.getRawY() - initialTouchY);
+                    if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
                         if (!hasMoved) {
-                            if (elapsed > 600) { js("window.petEngine && petEngine.onLongPress()"); }
-                            else if (System.currentTimeMillis() - lastTap < 300) { js("window.petEngine && petEngine.onDoubleTap()"); }
-                            else { lastTap = System.currentTimeMillis(); js("window.petEngine && petEngine.onTap()"); }
-                        } else if (isDragging) {
-                            js("window.petEngine && petEngine.onDragEnd()");
-                            isDragging = false;
+                            hasMoved = true;
+                            isDragging = true;
+                            js("window.petEngine && petEngine.onDragStart()");
                         }
-                        return true;
-                    default: return false;
-                }
+                        touchParams.x = initialX + dx;
+                        touchParams.y = initialY + dy;
+                        webParams.x = touchParams.x - touchOffsetXPx;
+                        webParams.y = touchParams.y - touchOffsetYPx;
+                        wm.updateViewLayout(touchView, touchParams);
+                        wm.updateViewLayout(webView, webParams);
+                    }
+                    return true;
+                case MotionEvent.ACTION_UP:
+                    long elapsed = System.currentTimeMillis() - touchStart;
+                    if (!hasMoved) {
+                        if (elapsed > 600) {
+                            js("window.petEngine && petEngine.onLongPress()");
+                        } else if (System.currentTimeMillis() - lastTap < 300) {
+                            js("window.petEngine && petEngine.onDoubleTap()");
+                        } else {
+                            lastTap = System.currentTimeMillis();
+                            js("window.petEngine && petEngine.onTap()");
+                        }
+                    } else if (isDragging) {
+                        js("window.petEngine && petEngine.onDragEnd()");
+                        isDragging = false;
+                    }
+                    return true;
+                default:
+                    return false;
             }
         });
-        wm.addView(webView, params);
+        wm.addView(touchView, touchParams);
     }
 
     private void startWhisperRotation() {
@@ -223,6 +255,7 @@ public class OverlayService extends Service {
     @Override public void onDestroy() {
         if (whisperRunnable != null) mainHandler.removeCallbacks(whisperRunnable);
         if (stateReceiver != null) { unregisterReceiver(stateReceiver); stateReceiver = null; }
+        if (touchView != null) { wm.removeView(touchView); touchView = null; }
         if (webView != null) { wm.removeView(webView); webView.destroy(); webView = null; }
         super.onDestroy();
     }

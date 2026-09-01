@@ -1,43 +1,8 @@
 <!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html><head><meta charset="utf-8">
 <style>
-*{margin:0;padding:0}
-html,body{background:transparent;width:100%;height:100%;overflow:visible;position:relative}
-#pet-container{width:100%;height:100%;position:relative}
-#pet{width:100%;height:100%;display:flex;align-items:center;justify-content:center}
-#pet svg{width:100%;height:100%}
-#bubble{
-  position:fixed;top:0;left:0;right:0;
-  background:red;color:white;
-  padding:8px;font-size:14px;font-weight:bold;
-  font-family:sans-serif;text-align:center;
-  z-index:2147483647;
-}
+body{background:red;color:white;font-size:40px;font-family:sans-serif;text-align:center;padding-top:40px}
 </style>
 </head><body>
-<div id="bubble">HELLO BUBBLE TEST</div>
-<div id="pet-container">
-  <div id="pet"></div>
-</div>
-<script>
-var SVG_BASE = 'file:///sdcard/Download/clawd-pet/all-svgs/';
-var STATES = {'idle':'clawd-mini-idle.svg','enter':'clawd-mini-enter.svg'};
-var currentState = 'idle';
-var svgCache = {};
-function loadSVG(state) {
-  var file = STATES[state] || STATES['idle'];
-  if (svgCache[file]) { document.getElementById('pet').innerHTML = svgCache[file]; return; }
-  var xhr = new XMLHttpRequest();
-  xhr.open('GET', SVG_BASE + file, true);
-  xhr.onload = function() {
-    if (xhr.status === 200 || xhr.status === 0) {
-      svgCache[file] = xhr.responseText;
-      if (currentState === state) document.getElementById('pet').innerHTML = xhr.responseText;
-    }
-  };
-  xhr.send();
-}
-function show(s) { if (!STATES[s]) s='idle'; currentState=s; loadSVG(s); }
-show('idle');
-</script>
+BUILD 31
 </body></html>

@@ -7,16 +7,17 @@ html,body{background:transparent;width:100%;height:100%;overflow:hidden;position
 #pet{width:100%;height:100%;display:flex;align-items:center;justify-content:center}
 #pet svg{width:100%;height:100%}
 #bubble{
-  position:absolute;bottom:105%;left:50%;transform:translateX(-50%);
+  position:absolute;top:2px;left:50%;transform:translateX(-50%);
   background:rgba(255,255,255,0.92);border-radius:12px;padding:6px 10px;
   font-size:11px;font-family:sans-serif;color:#333;
   opacity:0;transition:opacity 0.3s;pointer-events:none;
-  max-width:200px;white-space:normal;text-align:center;
+  max-width:130px;white-space:normal;text-align:center;
   box-shadow:0 1px 4px rgba(0,0,0,0.15);
+  z-index:10;
 }
 #bubble.show{opacity:1}
 #bubble::after{
-  content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);
+  content:'';position:absolute;bottom:-9px;left:50%;transform:translateX(-50%);
   border:5px solid transparent;border-top-color:rgba(255,255,255,0.92);
 }
 </style>
@@ -85,7 +86,7 @@ var lonelyTimer = null;
 var lastInteraction = Date.now();
 var svgCache = {};
 
-var IDLE_POOL = ['idle','idle','idle','look','bubble','living','peek','doze'];
+var IDLE_POOL = ['idle','idle','idle','look','bubble','living','peek','doze','yawn','crabwalk'];
 
 var LONELY_STAGES = [
   {min:5,  state:'peek'},
@@ -96,8 +97,7 @@ var LONELY_STAGES = [
 ];
 
 function loadSVG(state) {
-  var file = STATES[state];
-  if (!file) file = STATES['idle'];
+  var file = STATES[state] || STATES['idle'];
   if (svgCache[file]) {
     document.getElementById('pet').innerHTML = svgCache[file];
     return;
@@ -120,10 +120,12 @@ function show(s) {
   currentState = s;
   loadSVG(s);
   clearIdleTimer();
+
   if (s !== 'idle' && s !== 'sleeping' && s !== 'doze' && s !== 'reading'
       && s !== 'thinking' && s !== 'typing' && s !== 'working'
       && s !== 'building' && s !== 'debugger' && s !== 'drag'
-      && s !== 'ultrathink' && s !== 'wizard' && s !== 'work-typing') {
+      && s !== 'ultrathink' && s !== 'wizard' && s !== 'work-typing'
+      && s !== 'sweeping' && s !== 'juggling' && s !== 'carrying') {
     idleTimer = setTimeout(function(){ show('idle'); }, 5000);
   }
   if (s === 'idle') { scheduleIdleRotation(); }
@@ -152,7 +154,10 @@ function showBubble(text, duration) {
   el.textContent = text;
   el.className = 'show';
   if (bubbleTimer) clearTimeout(bubbleTimer);
-  bubbleTimer = setTimeout(function() { el.className = ''; bubbleTimer = null; }, duration || 4000);
+  bubbleTimer = setTimeout(function() {
+    el.className = '';
+    bubbleTimer = null;
+  }, duration || 4000);
 }
 
 function hideBubble() {

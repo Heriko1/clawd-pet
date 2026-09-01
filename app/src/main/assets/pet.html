@@ -1,8 +1,244 @@
 <!DOCTYPE html>
-<html><head><meta charset="utf-8">
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-body{background:red;color:white;font-size:40px;font-family:sans-serif;text-align:center;padding-top:40px}
+*{margin:0;padding:0}
+html,body{background:transparent;width:100%;height:100%;overflow:hidden;position:relative}
+#pet-container{width:100%;height:100%;position:relative}
+#pet{width:100%;height:100%;display:flex;align-items:center;justify-content:center}
+#pet svg{width:100%;height:100%}
+#bubble{
+  position:absolute;top:46%;left:50%;transform:translateX(-50%);
+  background:rgba(255,255,255,0.92);border-radius:12px;padding:6px 10px;
+  font-size:11px;font-family:sans-serif;color:#333;
+  opacity:0;transition:opacity 0.3s;pointer-events:none;
+  max-width:130px;white-space:normal;text-align:center;
+  box-shadow:0 1px 4px rgba(0,0,0,0.15);
+  z-index:10;
+}
+#bubble.show{opacity:1}
+#bubble::after{
+  content:'';position:absolute;bottom:-9px;left:50%;transform:translateX(-50%);
+  border:5px solid transparent;border-top-color:rgba(255,255,255,0.92);
+}
 </style>
 </head><body>
-BUILD 31
+<div id="pet-container">
+  <div id="bubble"></div>
+  <div id="pet"></div>
+</div>
+<script>
+var SVG_BASE = 'file:///sdcard/Download/clawd-pet/all-svgs/';
+
+var STATES = {
+  'idle':           'clawd-mini-idle.svg',
+  'typing':         'clawd-mini-typing.svg',
+  'happy':          'clawd-mini-happy.svg',
+  'sleeping':       'clawd-mini-sleep.svg',
+  'enter-sleep':    'clawd-mini-enter-sleep.svg',
+  'alert':          'clawd-mini-alert.svg',
+  'peek':           'clawd-mini-peek.svg',
+  'enter':          'clawd-mini-enter.svg',
+  'crabwalk':       'clawd-mini-crabwalk.svg',
+  'drag':           'clawd-react-drag.svg',
+  'annoyed':        'clawd-react-annoyed.svg',
+  'double-jump':    'clawd-react-double-jump.svg',
+  'react-left':     'clawd-react-left.svg',
+  'react-right':    'clawd-react-right.svg',
+  'react-double':   'clawd-react-double.svg',
+  'bubble':         'clawd-idle-bubble.svg',
+  'look':           'clawd-idle-look.svg',
+  'follow':         'clawd-idle-follow.svg',
+  'living':         'clawd-idle-living.svg',
+  'doze':           'clawd-idle-doze.svg',
+  'reading':        'clawd-idle-reading.svg',
+  'yawn':           'clawd-idle-yawn.svg',
+  'low-battery':    'clawd-idle-low-battery.svg',
+  'idle-collapse':  'clawd-idle-collapse.svg',
+  'thinking':       'clawd-working-thinking.svg',
+  'ultrathink':     'clawd-working-ultrathink.svg',
+  'working':        'clawd-working-typing-boss.svg',
+  'wizard':         'clawd-working-wizard.svg',
+  'building':       'clawd-working-building.svg',
+  'debugger':       'clawd-working-debugger.svg',
+  'juggling':       'clawd-working-juggling.svg',
+  'sweeping':       'clawd-working-sweeping.svg',
+  'carrying':       'clawd-working-carrying.svg',
+  'work-typing':    'clawd-working-typing.svg',
+  'error':          'clawd-error.svg',
+  'coffee':         'clawd-coffee-hand.svg',
+  'coffee-flip':    'clawd-coffee-head-flip.svg',
+  'music':          'clawd-headphones-groove.svg',
+  'dizzy':          'clawd-dizzy.svg',
+  'shy':            'clawd-aegyo-shy.svg',
+  'wake':           'clawd-wake.svg',
+  'notification':   'clawd-notification.svg',
+  'collapse-sleep': 'clawd-collapse-sleep.svg',
+  'about':          'clawd-about-hero.svg',
+  'outlaw':         'clawd-outlaw-bender.svg',
+  'static':         'clawd-static-base.svg'
+};
+
+var currentState = 'idle';
+var idleTimer = null;
+var bubbleTimer = null;
+var lonelyMinutes = 0;
+var lonelyTimer = null;
+var lastInteraction = Date.now();
+var svgCache = {};
+
+var IDLE_POOL = ['idle','idle','idle','look','bubble','living','peek','doze','yawn','crabwalk'];
+
+var LONELY_STAGES = [
+  {min:5,  state:'peek'},
+  {min:10, state:'bubble'},
+  {min:15, state:'reading'},
+  {min:20, state:'doze'},
+  {min:30, state:'sleeping'}
+];
+
+function loadSVG(state) {
+  var file = STATES[state] || STATES['idle'];
+  if (svgCache[file]) {
+    document.getElementById('pet').innerHTML = svgCache[file];
+    return;
+  }
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', SVG_BASE + file, true);
+  xhr.onload = function() {
+    if (xhr.status === 200 || xhr.status === 0) {
+      svgCache[file] = xhr.responseText;
+      if (currentState === state) {
+        document.getElementById('pet').innerHTML = xhr.responseText;
+      }
+    }
+  };
+  xhr.send();
+}
+
+function show(s) {
+  if (!STATES[s]) s = 'idle';
+  currentState = s;
+  loadSVG(s);
+  clearIdleTimer();
+
+  if (s !== 'idle' && s !== 'sleeping' && s !== 'doze' && s !== 'reading'
+      && s !== 'thinking' && s !== 'typing' && s !== 'working'
+      && s !== 'building' && s !== 'debugger' && s !== 'drag'
+      && s !== 'ultrathink' && s !== 'wizard' && s !== 'work-typing'
+      && s !== 'sweeping' && s !== 'juggling' && s !== 'carrying') {
+    idleTimer = setTimeout(function(){ show('idle'); }, 5000);
+  }
+  if (s === 'idle') { scheduleIdleRotation(); }
+  if (['peek','bubble','reading','doze','sleeping'].indexOf(s) < 0) { resetLonely(); }
+}
+
+function clearIdleTimer() {
+  if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+}
+
+function scheduleIdleRotation() {
+  clearIdleTimer();
+  var delay = 25000 + Math.floor(Math.random() * 20000);
+  idleTimer = setTimeout(function() {
+    if (currentState === 'idle' || IDLE_POOL.indexOf(currentState) >= 0) {
+      var pick = IDLE_POOL[Math.floor(Math.random() * IDLE_POOL.length)];
+      currentState = pick;
+      loadSVG(pick);
+      scheduleIdleRotation();
+    }
+  }, delay);
+}
+
+function showBubble(text, duration) {
+  var el = document.getElementById('bubble');
+  el.textContent = text;
+  el.className = 'show';
+  if (bubbleTimer) clearTimeout(bubbleTimer);
+  bubbleTimer = setTimeout(function() {
+    el.className = '';
+    bubbleTimer = null;
+  }, duration || 4000);
+}
+
+function hideBubble() {
+  document.getElementById('bubble').className = '';
+  if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+}
+
+function resetLonely() { lonelyMinutes = 0; lastInteraction = Date.now(); }
+
+function checkLonely() {
+  lonelyMinutes = Math.floor((Date.now() - lastInteraction) / 60000);
+  if (['thinking','typing','working','building','debugger','drag',
+       'ultrathink','wizard','work-typing'].indexOf(currentState) >= 0) return;
+  for (var i = LONELY_STAGES.length - 1; i >= 0; i--) {
+    if (lonelyMinutes >= LONELY_STAGES[i].min) {
+      if (currentState !== LONELY_STAGES[i].state) {
+        currentState = LONELY_STAGES[i].state;
+        loadSVG(LONELY_STAGES[i].state);
+        clearIdleTimer();
+      }
+      break;
+    }
+  }
+}
+
+lonelyTimer = setInterval(checkLonely, 60000);
+
+/* ---------- whisper ---------- */
+var BUBBLE_GENERAL = [
+  '\u5728\u770b\u4f60\u2026', '\u2026', '(*\u00b4-`)', '\u60f3\u6233\u4e00\u4e0b\u5417',
+  '\u8e72\u7740\u5462', '\u6709\u70b9\u65e0\u804a', '\u4f60\u5728\u5e72\u561b', '\u55ef\uff1f',
+  '\u5077\u5077\u770b', '\u4eca\u5929\u4e5f\u5728\u54e6', '(\uff61\u02c3 \u1d55 \u02c2 )b'
+];
+var BUBBLE_LATE_NIGHT = [
+  '\u8be5\u7761\u4e86', '\u51e0\u70b9\u4e86\u4f60\u77e5\u9053\u5417', '\u4e0d\u8981\u71ac\u591c',
+  '\u6211\u56f0\u4e86\u4f60\u4e0d\u56f0\u5417', '\u518d\u4e0d\u7761\u6211\u751f\u6c14\u4e86', '\u665a\u5b89\u2026',
+  '\u624b\u673a\u653e\u4e0b', '\u660e\u5929\u518d\u73a9'
+];
+var BUBBLE_MORNING = [
+  '\u65e9', '\u8d77\u6765\u4e86\uff1f', '\u65e9\u4e0a\u597d', '\u4eca\u5929\u4e5f\u52a0\u6cb9',
+  '\u8bb0\u5f97\u5403\u65e9\u996d'
+];
+var BUBBLE_LUNCH = [
+  '\u5403\u996d\u4e86\u5417', '\u8be5\u5403\u5348\u996d\u4e86', '\u522b\u5fd8\u4e86\u5403\u4e1c\u897f',
+  '\u4e2d\u5348\u4e86\u54e6'
+];
+var WORKING_STATES = ['thinking','typing','working','building','debugger',
+  'ultrathink','wizard','work-typing','sweeping','juggling','carrying'];
+
+function getBubblePool() {
+  var h = new Date().getHours();
+  if (h >= 0 && h < 6) return BUBBLE_LATE_NIGHT;
+  if (h >= 6 && h < 9) return BUBBLE_MORNING;
+  if (h >= 12 && h < 14) return BUBBLE_LUNCH;
+  return BUBBLE_GENERAL;
+}
+
+var whisperTimer = null;
+function scheduleWhisper() {
+  if (whisperTimer) clearTimeout(whisperTimer);
+  var delay = (15 + Math.floor(Math.random() * 10)) * 60 * 1000;
+  whisperTimer = setTimeout(function() {
+    if (WORKING_STATES.indexOf(currentState) < 0) {
+      var pool = getBubblePool();
+      var pick = pool[Math.floor(Math.random() * pool.length)];
+      showBubble(pick);
+    }
+    scheduleWhisper();
+  }, delay);
+}
+
+window.petEngine = {
+  onTap: function() { resetLonely(); var r=['happy','alert','shy','peek']; show(r[Math.floor(Math.random()*r.length)]); },
+  onDoubleTap: function() { resetLonely(); show('double-jump'); },
+  onLongPress: function() { resetLonely(); show('collapse-sleep'); },
+  onDragStart: function() { resetLonely(); show('drag'); },
+  onDragEnd: function() { show('dizzy'); setTimeout(function(){ show('idle'); }, 2000); }
+};
+
+show('enter');
+setTimeout(function(){ show('idle'); }, 2000);
+scheduleWhisper();
+</script>
 </body></html>

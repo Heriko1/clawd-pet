@@ -32,15 +32,12 @@ public class OverlayService extends Service {
     private static final long WHISPER_INTERVAL = 3600_000L;
     private static final String PET_DIR = "/sdcard/Download/clawd-pet/";
 
-    // Layer 2 (top): WebView renders full size, FLAG_NOT_TOUCHABLE
     private static final int VIEW_W_DP = 150;
     private static final int VIEW_H_DP = 185;
-    // Layer 1 (bottom): small touch receiver on crab body
     private static final int TOUCH_W_DP = 65;
     private static final int TOUCH_H_DP = 55;
-    // Offset from WebView origin to crab body center
-    private static final int TOUCH_OFFSET_X_DP = 42;  // (150-65)/2 ~ center
-    private static final int TOUCH_OFFSET_Y_DP = 90;   // crab body is in the lower portion
+    private static final int TOUCH_OFFSET_X_DP = 42;
+    private static final int TOUCH_OFFSET_Y_DP = 90;
 
     private WindowManager wm;
     private WebView webView;
@@ -126,7 +123,7 @@ public class OverlayService extends Service {
 
         int startX = 20, startY = 220;
 
-        // --- Layer 1 (added first = bottom): Touch receiver ---
+        // --- Layer 1 (bottom): Touch receiver ---
         touchParams = new WindowManager.LayoutParams(
             dp(TOUCH_W_DP), dp(TOUCH_H_DP),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -188,7 +185,7 @@ public class OverlayService extends Service {
         });
         wm.addView(touchView, touchParams);
 
-        // --- Layer 2 (added second = top): WebView render only ---
+        // --- Layer 2 (top): WebView render only, NOT_TOUCHABLE ---
         webParams = new WindowManager.LayoutParams(
             dp(VIEW_W_DP), dp(VIEW_H_DP),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -199,9 +196,11 @@ public class OverlayService extends Service {
         webParams.gravity = Gravity.TOP | Gravity.START;
         webParams.x = startX;
         webParams.y = startY;
+        webParams.alpha = 1.0f;  // force full opacity
 
         webView = new WebView(this);
         webView.setBackgroundColor(0x00000000);
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);  // force hardware rendering
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);

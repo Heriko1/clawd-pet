@@ -35,12 +35,12 @@ public class OverlayService extends Service {
     // Layer 1: WebView renders full size, FLAG_NOT_TOUCHABLE
     private static final int VIEW_W_DP = 150;
     private static final int VIEW_H_DP = 185;
-    // Layer 2: small transparent touch receiver centered on crab body
+    // Layer 2: small transparent touch receiver on crab body
     private static final int TOUCH_W_DP = 80;
-    private static final int TOUCH_H_DP = 90;
-    // Offset from WebView origin to center touch on crab
+    private static final int TOUCH_H_DP = 70;
+    // Offset: crab body sits in the lower-center of the SVG
     private static final int TOUCH_OFFSET_X_DP = 35;  // (150-80)/2
-    private static final int TOUCH_OFFSET_Y_DP = 57;  // (185-90)/2 + 10, crab sits lower
+    private static final int TOUCH_OFFSET_Y_DP = 80;  // push well below top decorations
 
     private WindowManager wm;
     private WebView webView;
@@ -155,19 +155,19 @@ public class OverlayService extends Service {
         }
         wm.addView(webView, webParams);
 
-        // --- Layer 2: Touch receiver (transparent, small) ---
+        // --- Layer 2: Touch receiver (fully transparent, small) ---
         touchParams = new WindowManager.LayoutParams(
             dp(TOUCH_W_DP), dp(TOUCH_H_DP),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT);
+            PixelFormat.TRANSPARENT);  // TRANSPARENT not TRANSLUCENT - avoids alpha blending
         touchParams.gravity = Gravity.TOP | Gravity.START;
         touchParams.x = startX + touchOffsetXPx;
         touchParams.y = startY + touchOffsetYPx;
 
         touchView = new View(this);
-        touchView.setBackgroundColor(0x00000000);
+        // No background at all - fully invisible to compositor
         touchView.setOnTouchListener((v, e) -> {
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:

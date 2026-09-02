@@ -180,6 +180,22 @@ public class OverlayService extends Service {
         webView.setOnTouchListener((v, e) -> {
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
+                    // Hit test: only respond to touches in valid area
+                    float x = e.getX();
+                    float y = e.getY();
+                    int w = v.getWidth();
+                    int h = v.getHeight();
+                    
+                    // Valid area: horizontal center 100dp, vertical 60dp-from-top to 25dp-from-bottom
+                    float leftBound = dp(25);
+                    float rightBound = w - dp(25);
+                    float topBound = dp(60);
+                    float bottomBound = h - dp(25);
+                    
+                    if (x < leftBound || x > rightBound || y < topBound || y > bottomBound) {
+                        return false; // Let touch pass through
+                    }
+                    
                     initialX = params.x;
                     initialY = params.y;
                     initialTouchX = e.getRawX();

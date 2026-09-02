@@ -52,6 +52,7 @@ public class OverlayService extends Service {
     private boolean hasMoved = false;
     private boolean isDragging = false;
     private boolean isFullSize = true;
+    private boolean isValidTouch = false;
     private Handler mainHandler;
     private BroadcastReceiver stateReceiver;
     private Random random = new Random();
@@ -193,9 +194,11 @@ public class OverlayService extends Service {
                     float bottomBound = h - dp(25);
                     
                     if (x < leftBound || x > rightBound || y < topBound || y > bottomBound) {
+                        isValidTouch = false;
                         return false; // Let touch pass through
                     }
                     
+                    isValidTouch = true;
                     initialX = params.x;
                     initialY = params.y;
                     initialTouchX = e.getRawX();
@@ -205,6 +208,7 @@ public class OverlayService extends Service {
                     isDragging = false;
                     return true;
                 case MotionEvent.ACTION_MOVE:
+                    if (!isValidTouch) return false;
                     int dx = (int)(e.getRawX() - initialTouchX);
                     int dy = (int)(e.getRawY() - initialTouchY);
                     if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
@@ -219,6 +223,7 @@ public class OverlayService extends Service {
                     }
                     return true;
                 case MotionEvent.ACTION_UP:
+                    if (!isValidTouch) return false;
                     long elapsed = System.currentTimeMillis() - touchStart;
                     if (!hasMoved) {
                         if (elapsed > 600) {

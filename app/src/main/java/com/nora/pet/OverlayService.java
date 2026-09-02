@@ -165,6 +165,9 @@ public class OverlayService extends Service {
         s.setAllowFileAccess(true);
         s.setAllowFileAccessFromFileURLs(true);
         s.setAllowUniversalAccessFromFileURLs(true);
+        // Disable cache to always load fresh pet.html
+        s.setCacheMode(WebSettings.LOAD_NO_CACHE);
+        s.setAppCacheEnabled(false);
         webView.setWebViewClient(new WebViewClient());
         webView.addJavascriptInterface(new PetBridge(), "Android");
 

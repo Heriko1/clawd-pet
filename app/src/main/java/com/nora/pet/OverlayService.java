@@ -22,6 +22,7 @@ import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
 import java.io.File;
 import java.util.Calendar;
 import java.util.Random;
@@ -34,13 +35,15 @@ public class OverlayService extends Service {
     private static final String PET_DIR = "/sdcard/Download/clawd-pet/";
 
     /* 画布逻辑尺寸（dp）。必须与 pet.html 里的 CANVAS_W / CANVAS_H 保持一致。
-       窗口只是画布上被裁剪出来的一块，窗口没覆盖的地方没有窗口，
-       触摸会直接落到下层应用 —— 这是唯一能做到真穿透的办法。
-       （onTouchListener 返回 false 只是 WebView 不处理，事件不会漏出窗口。） */
+       WebView 永远是这个尺寸；窗口只是画布上裁出来的一块。
+       窗口没覆盖的地方没有窗口，触摸会直接落到下层应用 —— 这是唯一能做到
+       真穿透的办法（onTouchListener 返回 false 只是 WebView 不处理，
+       事件已被窗口消费，不会漏出去）。 */
     private static final int CANVAS_W_DP = 150;
     private static final int CANVAS_H_DP = 185;
 
     private WindowManager wm;
+    private FrameLayout root;
     private WebView webView;
     private WindowManager.LayoutParams params;
 
@@ -84,7 +87,7 @@ public class OverlayService extends Service {
 
     // --- JS Bridge ---
     private class PetBridge {
-        /* 旧接口，保留以兼容老 pet.html。geo2 之后窗口尺寸由实测包围盒决定。 */
+        /* 旧接口，保留以兼容老 pet.html。窗口尺寸现在由实测包围盒决定。 */
         @JavascriptInterface
         public void requestResize(boolean full) { }
 
@@ -104,22 +107,37 @@ public class OverlayService extends Service {
         if (webView == null || params == null) return;
         if (ww < 8 || wh < 8) return;   // 测量异常，保持现状
         bodyX = bx; bodyY = by; bodyW = bw; bodyH = bh;
-        winX = Math.round(wx); winY = Math.round(wy);
-        winW = Math.round(ww); winH = Math.round(wh);
+        int nx = Math.round(wx), ny = Math.round(wy);
+        int nw = Math.round(ww), nh = Math.round(wh);
+        if (nx == winX && ny == winY && nw == winW && nh == winH) return;
+        winX = nx; winY = ny; winW = nw; winH = nh;
         if (isDragging) { pendingGeo = true; return; }   // 拖拽中改窗口会打断手势
         syncWindow();
     }
 
-    /* 把窗口摆到 画布原点 + 裁剪偏移 的位置，并让 WebView 内部反向平移同样的量，
-       这样螃蟹在屏幕上的绝对位置不动 —— 补偿只做一次，不会两边叠加。 */
+    /* 裁剪：窗口摆到 画布原点 + 裁剪偏移，同时用负 margin 把 WebView 往反方向挪
+       同样的量。两者在同一次 layout pass 内生效，所以螃蟹在屏幕上的绝对位置
+       不会出现中间态 —— 这是消除闪现的关键，不能改回异步的 JS transform。 */
     private void syncWindow() {
-        if (webView == null || params == null) return;
+        if (root == null || webView == null || params == null) return;
         params.x = canvasX + dp(winX);
         params.y = canvasY + dp(winY);
         params.width = dp(winW);
         params.height = dp(winH);
-        try { wm.updateViewLayout(webView, params); } catch (Exception e) {}
-        js("window.petGeo && petGeo.applyCrop(" + winX + "," + winY + ")");
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) webView.getLayoutParams();
+        lp.leftMargin = -dp(winX);
+        lp.topMargin = -dp(winY);
+        webView.setLayoutParams(lp);
+        try { wm.updateViewLayout(root, params); } catch (Exception e) {}
+    }
+
+    /* 拖拽：只挪窗口，不碰尺寸、不碰子 View 布局、不调 JS。
+       WebView 尺寸恒定，CSS 不会重排，所以拖拽是即时的。 */
+    private void moveWindow() {
+        if (root == null || params == null) return;
+        params.x = canvasX + dp(winX);
+        params.y = canvasY + dp(winY);
+        try { wm.updateViewLayout(root, params); } catch (Exception e) {}
     }
 
     @Override public IBinder onBind(Intent i) { return null; }
@@ -212,9 +230,9 @@ public class OverlayService extends Service {
             @Override public boolean onTouch(View v, MotionEvent e) {
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
-                        // 触摸点换算到画布坐标，再判断有没有落在螃蟹实体上
-                        float cx = winX + e.getX() / density;
-                        float cy = winY + e.getY() / density;
+                        // WebView 原点恒等于画布原点，所以局部坐标就是画布坐标
+                        float cx = e.getX() / density;
+                        float cy = e.getY() / density;
                         if (cx < bodyX || cx > bodyX + bodyW || cy < bodyY || cy > bodyY + bodyH) {
                             isValidTouch = false;
                             return false;
@@ -240,7 +258,7 @@ public class OverlayService extends Service {
                             }
                             canvasX = initialX + dx;
                             canvasY = initialY + dy;
-                            syncWindow();
+                            moveWindow();
                         }
                         return true;
                     case MotionEvent.ACTION_UP:
@@ -270,7 +288,12 @@ public class OverlayService extends Service {
                 }
             }
         });
-        wm.addView(webView, params);
+
+        // root 跟随窗口尺寸并裁剪超出部分；WebView 固定画布尺寸，靠负 margin 偏移
+        root = new FrameLayout(this);
+        root.setBackgroundColor(0x00000000);
+        root.addView(webView, new FrameLayout.LayoutParams(dp(CANVAS_W_DP), dp(CANVAS_H_DP)));
+        wm.addView(root, params);
     }
 
     private void startWhisperRotation() {
@@ -309,7 +332,8 @@ public class OverlayService extends Service {
     @Override public void onDestroy() {
         if (whisperRunnable != null) mainHandler.removeCallbacks(whisperRunnable);
         if (stateReceiver != null) { unregisterReceiver(stateReceiver); stateReceiver = null; }
-        if (webView != null) { wm.removeView(webView); webView.destroy(); webView = null; }
+        if (root != null) { try { wm.removeView(root); } catch (Exception e) {} root = null; }
+        if (webView != null) { webView.destroy(); webView = null; }
         super.onDestroy();
     }
 }

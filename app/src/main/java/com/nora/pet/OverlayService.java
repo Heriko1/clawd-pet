@@ -33,25 +33,30 @@ public class OverlayService extends Service {
     private static final long WHISPER_INTERVAL = 3600_000L;
     private static final String PET_DIR = "/sdcard/Download/clawd-pet/";
 
-    // Full window: room for jump animations, bubbles, entrance
-    private static final int FULL_W_DP = 150;
-    private static final int FULL_H_DP = 185;
-    // Compact: tight around crab body
-    private static final int COMPACT_W_DP = 100;
-    private static final int COMPACT_H_DP = 110;
-    // Position offsets to keep crab centered on screen when resizing
-    private static final int RESIZE_DX_DP = 25;  // (150-100)/2
-    private static final int RESIZE_DY_DP = 75;  // 185-110
+    /* 画布逻辑尺寸（dp）。必须与 pet.html 里的 CANVAS_W / CANVAS_H 保持一致。
+       窗口只是画布上被裁剪出来的一块，窗口没覆盖的地方没有窗口，
+       触摸会直接落到下层应用 —— 这是唯一能做到真穿透的办法。
+       （onTouchListener 返回 false 只是 WebView 不处理，事件不会漏出窗口。） */
+    private static final int CANVAS_W_DP = 150;
+    private static final int CANVAS_H_DP = 185;
 
     private WindowManager wm;
     private WebView webView;
     private WindowManager.LayoutParams params;
+
+    /* 画布原点在屏幕上的位置。拖拽改的是这个，不是 params.x/y。 */
+    private int canvasX = 20, canvasY = 220;
+    /* 窗口裁剪区，画布坐标系，dp */
+    private int winX = 0, winY = 0, winW = CANVAS_W_DP, winH = CANVAS_H_DP;
+    /* 螃蟹实体范围，画布坐标系，dp。由 pet.html 用 getBBox 实测上报，决定有效点击区。 */
+    private float bodyX = 0, bodyY = 0, bodyW = CANVAS_W_DP, bodyH = CANVAS_H_DP;
+    private boolean pendingGeo = false;
+
     private int initialX, initialY;
     private float initialTouchX, initialTouchY;
     private long lastTap = 0, touchStart = 0;
     private boolean hasMoved = false;
     private boolean isDragging = false;
-    private boolean isFullSize = true;
     private boolean isValidTouch = false;
     private Handler mainHandler;
     private BroadcastReceiver stateReceiver;
@@ -79,27 +84,42 @@ public class OverlayService extends Service {
 
     // --- JS Bridge ---
     private class PetBridge {
+        /* 旧接口，保留以兼容老 pet.html。geo2 之后窗口尺寸由实测包围盒决定。 */
         @JavascriptInterface
-        public void requestResize(boolean full) {
-            mainHandler.post(() -> doResize(full));
+        public void requestResize(boolean full) { }
+
+        /* pet.html 每次换 SVG / 气泡开合后调这个上报几何。
+           win* = 窗口该裁到多大；body* = 螃蟹实体在哪，用于命中判定。 */
+        @JavascriptInterface
+        public void reportGeo(final float wx, final float wy, final float ww, final float wh,
+                              final float bx, final float by, final float bw, final float bh) {
+            mainHandler.post(new Runnable() {
+                @Override public void run() { applyGeo(wx, wy, ww, wh, bx, by, bw, bh); }
+            });
         }
     }
 
-    private void doResize(boolean full) {
-        if (full == isFullSize || webView == null || params == null) return;
-        isFullSize = full;
-        if (full) {
-            params.width = dp(FULL_W_DP);
-            params.height = dp(FULL_H_DP);
-            params.x -= dp(RESIZE_DX_DP);
-            params.y -= dp(RESIZE_DY_DP);
-        } else {
-            params.width = dp(COMPACT_W_DP);
-            params.height = dp(COMPACT_H_DP);
-            params.x += dp(RESIZE_DX_DP);
-            params.y += dp(RESIZE_DY_DP);
-        }
+    private void applyGeo(float wx, float wy, float ww, float wh,
+                          float bx, float by, float bw, float bh) {
+        if (webView == null || params == null) return;
+        if (ww < 8 || wh < 8) return;   // 测量异常，保持现状
+        bodyX = bx; bodyY = by; bodyW = bw; bodyH = bh;
+        winX = Math.round(wx); winY = Math.round(wy);
+        winW = Math.round(ww); winH = Math.round(wh);
+        if (isDragging) { pendingGeo = true; return; }   // 拖拽中改窗口会打断手势
+        syncWindow();
+    }
+
+    /* 把窗口摆到 画布原点 + 裁剪偏移 的位置，并让 WebView 内部反向平移同样的量，
+       这样螃蟹在屏幕上的绝对位置不动 —— 补偿只做一次，不会两边叠加。 */
+    private void syncWindow() {
+        if (webView == null || params == null) return;
+        params.x = canvasX + dp(winX);
+        params.y = canvasY + dp(winY);
+        params.width = dp(winW);
+        params.height = dp(winH);
         try { wm.updateViewLayout(webView, params); } catch (Exception e) {}
+        js("window.petGeo && petGeo.applyCrop(" + winX + "," + winY + ")");
     }
 
     @Override public IBinder onBind(Intent i) { return null; }
@@ -122,14 +142,19 @@ public class OverlayService extends Service {
         stateReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context ctx, Intent intent) {
                 String state = intent.getStringExtra("state");
-                String text = intent.getStringExtra("text");
+                final String text = intent.getStringExtra("text");
                 if (webView != null) {
                     if (state != null) {
-                        mainHandler.post(() -> js("show('" + state + "')"));
+                        final String s = state;
+                        mainHandler.post(new Runnable() {
+                            @Override public void run() { js("show('" + s + "')"); }
+                        });
                     }
                     if (text != null) {
-                        String escaped = text.replace("'", "\\'");
-                        mainHandler.post(() -> js("showBubble('" + escaped + "')"));
+                        final String escaped = text.replace("\\", "\\\\").replace("'", "\\'");
+                        mainHandler.post(new Runnable() {
+                            @Override public void run() { js("showBubble('" + escaped + "')"); }
+                        });
                     }
                 }
             }
@@ -147,16 +172,15 @@ public class OverlayService extends Service {
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return; }
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
 
-        // Start full size for entrance animation
+        // 先按整块画布开窗，等 pet.html 上报实测几何后再裁剪
         params = new WindowManager.LayoutParams(
-            dp(FULL_W_DP), dp(FULL_H_DP),
+            dp(CANVAS_W_DP), dp(CANVAS_H_DP),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.START;
-        params.x = 20; params.y = 220;
-        isFullSize = true;
+        params.x = canvasX; params.y = canvasY;
 
         webView = new WebView(this);
         webView.setBackgroundColor(0x00000000);
@@ -168,7 +192,12 @@ public class OverlayService extends Service {
         s.setAllowUniversalAccessFromFileURLs(true);
         // Disable cache to always load fresh pet.html
         s.setCacheMode(WebSettings.LOAD_NO_CACHE);
-        webView.setWebViewClient(new WebViewClient());
+        webView.setWebViewClient(new WebViewClient() {
+            @Override public void onPageFinished(WebView view, String url) {
+                // 告诉 pet.html 这是支持窗口裁剪的新版本，可以开始实测上报
+                js("window.petGeo && petGeo.enable()");
+            }
+        });
         webView.addJavascriptInterface(new PetBridge(), "Android");
 
         File f = new File(PET_DIR + "pet.html");
@@ -178,69 +207,67 @@ public class OverlayService extends Service {
             webView.loadUrl("file:///android_asset/pet.html");
         }
 
-        webView.setOnTouchListener((v, e) -> {
-            switch (e.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN:
-                    // Hit test: only respond to touches in valid area
-                    float x = e.getX();
-                    float y = e.getY();
-                    int w = v.getWidth();
-                    int h = v.getHeight();
-                    
-                    // Valid area: horizontal center 100dp, vertical 60dp-from-top to 25dp-from-bottom
-                    float leftBound = dp(25);
-                    float rightBound = w - dp(25);
-                    float topBound = dp(60);
-                    float bottomBound = h - dp(25);
-                    
-                    if (x < leftBound || x > rightBound || y < topBound || y > bottomBound) {
-                        isValidTouch = false;
-                        return false; // Let touch pass through
-                    }
-                    
-                    isValidTouch = true;
-                    initialX = params.x;
-                    initialY = params.y;
-                    initialTouchX = e.getRawX();
-                    initialTouchY = e.getRawY();
-                    touchStart = System.currentTimeMillis();
-                    hasMoved = false;
-                    isDragging = false;
-                    return true;
-                case MotionEvent.ACTION_MOVE:
-                    if (!isValidTouch) return false;
-                    int dx = (int)(e.getRawX() - initialTouchX);
-                    int dy = (int)(e.getRawY() - initialTouchY);
-                    if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
-                        if (!hasMoved) {
-                            hasMoved = true;
-                            isDragging = true;
-                            js("window.petEngine && petEngine.onDragStart()");
+        final float density = getResources().getDisplayMetrics().density;
+        webView.setOnTouchListener(new View.OnTouchListener() {
+            @Override public boolean onTouch(View v, MotionEvent e) {
+                switch (e.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        // 触摸点换算到画布坐标，再判断有没有落在螃蟹实体上
+                        float cx = winX + e.getX() / density;
+                        float cy = winY + e.getY() / density;
+                        if (cx < bodyX || cx > bodyX + bodyW || cy < bodyY || cy > bodyY + bodyH) {
+                            isValidTouch = false;
+                            return false;
                         }
-                        params.x = initialX + dx;
-                        params.y = initialY + dy;
-                        wm.updateViewLayout(webView, params);
-                    }
-                    return true;
-                case MotionEvent.ACTION_UP:
-                    if (!isValidTouch) return false;
-                    long elapsed = System.currentTimeMillis() - touchStart;
-                    if (!hasMoved) {
-                        if (elapsed > 600) {
-                            js("window.petEngine && petEngine.onLongPress()");
-                        } else if (System.currentTimeMillis() - lastTap < 300) {
-                            js("window.petEngine && petEngine.onDoubleTap()");
-                        } else {
-                            lastTap = System.currentTimeMillis();
-                            js("window.petEngine && petEngine.onTap()");
-                        }
-                    } else if (isDragging) {
-                        js("window.petEngine && petEngine.onDragEnd()");
+                        isValidTouch = true;
+                        initialX = canvasX;
+                        initialY = canvasY;
+                        initialTouchX = e.getRawX();
+                        initialTouchY = e.getRawY();
+                        touchStart = System.currentTimeMillis();
+                        hasMoved = false;
                         isDragging = false;
-                    }
-                    return true;
-                default:
-                    return false;
+                        return true;
+                    case MotionEvent.ACTION_MOVE:
+                        if (!isValidTouch) return false;
+                        int dx = (int)(e.getRawX() - initialTouchX);
+                        int dy = (int)(e.getRawY() - initialTouchY);
+                        if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+                            if (!hasMoved) {
+                                hasMoved = true;
+                                isDragging = true;
+                                js("window.petEngine && petEngine.onDragStart()");
+                            }
+                            canvasX = initialX + dx;
+                            canvasY = initialY + dy;
+                            syncWindow();
+                        }
+                        return true;
+                    case MotionEvent.ACTION_UP:
+                        if (!isValidTouch) return false;
+                        long elapsed = System.currentTimeMillis() - touchStart;
+                        if (!hasMoved) {
+                            if (elapsed > 600) {
+                                js("window.petEngine && petEngine.onLongPress()");
+                            } else if (System.currentTimeMillis() - lastTap < 300) {
+                                js("window.petEngine && petEngine.onDoubleTap()");
+                            } else {
+                                lastTap = System.currentTimeMillis();
+                                js("window.petEngine && petEngine.onTap()");
+                            }
+                        } else if (isDragging) {
+                            js("window.petEngine && petEngine.onDragEnd()");
+                        }
+                        isDragging = false;
+                        if (pendingGeo) { pendingGeo = false; syncWindow(); }
+                        return true;
+                    case MotionEvent.ACTION_CANCEL:
+                        isDragging = false;
+                        if (pendingGeo) { pendingGeo = false; syncWindow(); }
+                        return false;
+                    default:
+                        return false;
+                }
             }
         });
         wm.addView(webView, params);

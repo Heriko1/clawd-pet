@@ -9,6 +9,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
+import android.graphics.Region;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -17,25 +19,33 @@ import android.provider.Settings;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewTreeObserver;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import java.io.File;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.Calendar;
 import java.util.Random;
 
 /**
- * 两个 overlay 分工：
+ * 单个 overlay，尺寸恒为完整画布，永不改变。
  *
- *   视觉窗口 = WebView，永远是完整画布，FLAG_NOT_TOUCHABLE，只负责画。
- *   触摸窗口 = 透明空 View，大小随实测包围盒变化，只负责收手势。
+ * 穿透靠「触摸区域」而不是「整窗不可触摸」：
+ * 窗口仍然是可触摸的（所以不会被系统当成 pass-through 窗口压暗），
+ * 但只把螃蟹包围盒声明为可接收触摸的区域，区域外的触摸由系统直接
+ * 投递给下层应用。
  *
- * 这样做的原因见 git log：把「裁剪窗口」和「平移内容」放进同一个窗口，
- * 无论用 JS transform 还是负 margin，两条管线都同步不上，切换状态时
- * 螃蟹会闪一下。现在会随状态改变几何的那个窗口是透明的 —— 没有像素，
- * 就没有东西可以错位。视觉窗口的尺寸是常量，压根不参与这件事。
+ * 演进历史见 git log：先后试过 JS transform 平移内容、负 margin 平移
+ * WebView、视觉/触摸双窗口。前两者都因为「窗口几何」和「内容偏移」
+ * 是两条无法同步的管线而闪现；第三种解决了闪现，但 FLAG_NOT_TOUCHABLE
+ * 导致螃蟹半透明。区域方案让三个约束（不闪现、不半透明、真穿透）
+ * 同时成立。
  */
 public class OverlayService extends Service {
     private static final String CHANNEL_ID = "pet_channel";
@@ -45,28 +55,31 @@ public class OverlayService extends Service {
     private static final String PET_DIR = "/sdcard/Download/clawd-pet/";
 
     /* 画布逻辑尺寸（dp），必须与 pet.html 里的 CANVAS_W / CANVAS_H 一致。
-       视觉窗口恒为这个尺寸，永不改变。 */
+       窗口恒为这个尺寸，只有拖拽会改 x/y。 */
     private static final int CANVAS_W_DP = 150;
     private static final int CANVAS_H_DP = 185;
 
+    /* ViewTreeObserver.InternalInsetsInfo.TOUCHABLE_INSETS_REGION，@hide 常量 */
+    private static final int TOUCHABLE_INSETS_REGION = 3;
+
     private WindowManager wm;
     private WebView webView;
-    private WindowManager.LayoutParams visualParams;
-    private View touchView;
-    private WindowManager.LayoutParams touchParams;
+    private WindowManager.LayoutParams params;
 
-    /* 画布原点在屏幕上的位置，拖拽改的是这个 */
     private int canvasX = 20, canvasY = 220;
-    /* 螃蟹实体范围，画布坐标系，dp。由 pet.html 用 getBBox 实测上报，
-       直接决定触摸窗口的位置和大小。 */
+    /* 螃蟹实体范围，画布坐标系，dp。由 pet.html 用 getBBox 实测上报。 */
     private float bodyX = 0, bodyY = 0, bodyW = CANVAS_W_DP, bodyH = CANVAS_H_DP;
-    private boolean pendingGeo = false;
+    /* 上面那个矩形换算成 px，直接作为窗口的可触摸区域 */
+    private final Rect touchRect = new Rect(0, 0, 9999, 9999);
+    /* 区域方案是否装上了。装不上就退回命中判定（不穿透但不半透明）。 */
+    private boolean regionMode = false;
 
     private int initialX, initialY;
     private float initialTouchX, initialTouchY;
     private long lastTap = 0, touchStart = 0;
     private boolean hasMoved = false;
     private boolean isDragging = false;
+    private boolean isValidTouch = false;
     private Handler mainHandler;
     private BroadcastReceiver stateReceiver;
     private Random random = new Random();
@@ -98,9 +111,9 @@ public class OverlayService extends Service {
         public void requestResize(boolean full) { }
 
         /* pet.html 每次换 SVG / 气泡开合后上报几何。
-           win* 是给上一版裁剪窗口用的，现在视觉窗口不裁剪了，忽略；
-           只用 body*（螃蟹实体范围）来摆触摸窗口。签名保持不变，
-           这样同一份 pet.html 在新旧 APK 上都能跑。 */
+           win* 是早期裁剪窗口方案的参数，窗口现在不再裁剪，忽略；
+           只取 body*（螃蟹实体范围）。签名保持 8 参不变，
+           同一份 pet.html 在新旧 APK 上都能跑。 */
         @JavascriptInterface
         public void reportGeo(final float wx, final float wy, final float ww, final float wh,
                               final float bx, final float by, final float bw, final float bh) {
@@ -114,29 +127,64 @@ public class OverlayService extends Service {
         if (bw < 8 || bh < 8) return;   // 测量异常，保持现状
         if (bx == bodyX && by == bodyY && bw == bodyW && bh == bodyH) return;
         bodyX = bx; bodyY = by; bodyW = bw; bodyH = bh;
-        // 拖拽途中改触摸窗口尺寸有打断手势的风险，推迟到手势结束
-        if (isDragging) { pendingGeo = true; return; }
-        syncTouchWindow();
+        updateTouchRect();
     }
 
-    /* 触摸窗口贴着螃蟹本体。它是透明的，所以尺寸怎么变都不会被看见。 */
-    private void syncTouchWindow() {
-        if (touchView == null || touchParams == null) return;
-        touchParams.x = canvasX + dpf(bodyX);
-        touchParams.y = canvasY + dpf(bodyY);
-        touchParams.width = Math.max(1, dpf(bodyW));
-        touchParams.height = Math.max(1, dpf(bodyH));
-        try { wm.updateViewLayout(touchView, touchParams); } catch (Exception e) {}
+    /* 只改 Rect + 请求重算内部 insets。不动窗口几何，不动 WebView 布局，
+       所以不会 relayout、不会重新光栅化、不会闪。 */
+    private void updateTouchRect() {
+        touchRect.set(dpf(bodyX), dpf(bodyY), dpf(bodyX + bodyW), dpf(bodyY + bodyH));
+        if (regionMode && webView != null) webView.requestLayout();
     }
 
-    /* 拖拽：两个窗口一起挪，只改 x/y。视觉窗口尺寸不变 → 不重排不重绘内容。 */
-    private void moveWindows() {
-        if (webView != null && visualParams != null) {
-            visualParams.x = canvasX;
-            visualParams.y = canvasY;
-            try { wm.updateViewLayout(webView, visualParams); } catch (Exception e) {}
+    /* 拖拽：只改窗口 x/y。触摸区域是窗口内的局部坐标，跟着窗口走，不用更新。 */
+    private void moveWindow() {
+        if (webView == null || params == null) return;
+        params.x = canvasX;
+        params.y = canvasY;
+        try { wm.updateViewLayout(webView, params); } catch (Exception e) {}
+    }
+
+    /* 用 Proxy 接入 @hide 的 OnComputeInternalInsetsListener，
+       把窗口的可触摸区域声明为 touchRect。
+       这是能同时拿到「穿透」和「不被压暗」的唯一途径：
+       窗口没有声明自己 pass-through，只是缩小了接收触摸的范围。 */
+    private boolean installTouchRegion(final View v) {
+        try {
+            Class<?> listenerCls = Class.forName(
+                "android.view.ViewTreeObserver$OnComputeInternalInsetsListener");
+            Class<?> infoCls = Class.forName(
+                "android.view.ViewTreeObserver$InternalInsetsInfo");
+            final Method setTouchableInsets = infoCls.getMethod("setTouchableInsets", int.class);
+            final Field regionField = infoCls.getField("touchableRegion");
+
+            Object listener = Proxy.newProxyInstance(
+                listenerCls.getClassLoader(),
+                new Class<?>[]{ listenerCls },
+                new InvocationHandler() {
+                    @Override public Object invoke(Object proxy, Method m, Object[] args) throws Throwable {
+                        String name = m.getName();
+                        if ("onComputeInternalInsets".equals(name) && args != null && args.length == 1) {
+                            Object info = args[0];
+                            setTouchableInsets.invoke(info, TOUCHABLE_INSETS_REGION);
+                            Region r = (Region) regionField.get(info);
+                            if (r != null) r.set(touchRect);
+                            return null;
+                        }
+                        if ("equals".equals(name)) return proxy == args[0];
+                        if ("hashCode".equals(name)) return System.identityHashCode(proxy);
+                        if ("toString".equals(name)) return "PetTouchRegionListener";
+                        return null;
+                    }
+                });
+
+            Method add = ViewTreeObserver.class.getMethod(
+                "addOnComputeInternalInsetsListener", listenerCls);
+            add.invoke(v.getViewTreeObserver(), listener);
+            return true;
+        } catch (Throwable t) {
+            return false;
         }
-        syncTouchWindow();
     }
 
     @Override public IBinder onBind(Intent i) { return null; }
@@ -188,22 +236,19 @@ public class OverlayService extends Service {
     private void setupOverlay() {
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return; }
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
-        setupVisualWindow();
-        setupTouchWindow();
-    }
 
-    /* 视觉窗口：完整画布，不可触摸。尺寸是常量，只有拖拽会改 x/y。 */
-    private void setupVisualWindow() {
-        visualParams = new WindowManager.LayoutParams(
+        // 注意：不加 FLAG_NOT_TOUCHABLE。那会让系统把窗口当成 pass-through
+        // 并压暗不透明度（螃蟹变半透明）。穿透交给 touchable region 处理。
+        params = new WindowManager.LayoutParams(
             dp(CANVAS_W_DP), dp(CANVAS_H_DP),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT);
-        visualParams.gravity = Gravity.TOP | Gravity.START;
-        visualParams.x = canvasX;
-        visualParams.y = canvasY;
+        params.gravity = Gravity.TOP | Gravity.START;
+        params.x = canvasX;
+        params.y = canvasY;
+        params.alpha = 1f;
 
         webView = new WebView(this);
         webView.setBackgroundColor(0x00000000);
@@ -229,28 +274,23 @@ public class OverlayService extends Service {
         } else {
             webView.loadUrl("file:///android_asset/pet.html");
         }
-        wm.addView(webView, visualParams);
-    }
 
-    /* 触摸窗口：透明空 View，边界就是螃蟹边界。
-       它收到的任何事件都必然落在螃蟹上，所以不需要命中判定。 */
-    private void setupTouchWindow() {
-        touchParams = new WindowManager.LayoutParams(
-            dp(CANVAS_W_DP), dp(CANVAS_H_DP),
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT);
-        touchParams.gravity = Gravity.TOP | Gravity.START;
-        touchParams.x = canvasX;
-        touchParams.y = canvasY;
-
-        touchView = new View(this);
-        touchView.setBackgroundColor(0x00000000);
-        touchView.setOnTouchListener(new View.OnTouchListener() {
+        final float density = getResources().getDisplayMetrics().density;
+        webView.setOnTouchListener(new View.OnTouchListener() {
             @Override public boolean onTouch(View v, MotionEvent e) {
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
+                        /* regionMode 下窗口只在螃蟹范围内收触摸，能进到这里
+                           就一定在螃蟹上。降级模式下才需要自己判一次。 */
+                        if (!regionMode) {
+                            float cx = e.getX() / density;
+                            float cy = e.getY() / density;
+                            if (cx < bodyX || cx > bodyX + bodyW || cy < bodyY || cy > bodyY + bodyH) {
+                                isValidTouch = false;
+                                return false;
+                            }
+                        }
+                        isValidTouch = true;
                         initialX = canvasX;
                         initialY = canvasY;
                         initialTouchX = e.getRawX();
@@ -260,6 +300,7 @@ public class OverlayService extends Service {
                         isDragging = false;
                         return true;
                     case MotionEvent.ACTION_MOVE:
+                        if (!isValidTouch) return false;
                         int dx = (int)(e.getRawX() - initialTouchX);
                         int dy = (int)(e.getRawY() - initialTouchY);
                         if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
@@ -270,10 +311,11 @@ public class OverlayService extends Service {
                             }
                             canvasX = initialX + dx;
                             canvasY = initialY + dy;
-                            moveWindows();
+                            moveWindow();
                         }
                         return true;
                     case MotionEvent.ACTION_UP:
+                        if (!isValidTouch) return false;
                         long elapsed = System.currentTimeMillis() - touchStart;
                         if (!hasMoved) {
                             if (elapsed > 600) {
@@ -288,18 +330,19 @@ public class OverlayService extends Service {
                             js("window.petEngine && petEngine.onDragEnd()");
                         }
                         isDragging = false;
-                        if (pendingGeo) { pendingGeo = false; syncTouchWindow(); }
                         return true;
                     case MotionEvent.ACTION_CANCEL:
                         isDragging = false;
-                        if (pendingGeo) { pendingGeo = false; syncTouchWindow(); }
-                        return true;
+                        return false;
                     default:
                         return false;
                 }
             }
         });
-        wm.addView(touchView, touchParams);
+
+        wm.addView(webView, params);
+        regionMode = installTouchRegion(webView);
+        updateTouchRect();
     }
 
     private void startWhisperRotation() {
@@ -339,7 +382,6 @@ public class OverlayService extends Service {
     @Override public void onDestroy() {
         if (whisperRunnable != null) mainHandler.removeCallbacks(whisperRunnable);
         if (stateReceiver != null) { unregisterReceiver(stateReceiver); stateReceiver = null; }
-        if (touchView != null) { try { wm.removeView(touchView); } catch (Exception e) {} touchView = null; }
         if (webView != null) {
             try { wm.removeView(webView); } catch (Exception e) {}
             webView.destroy();

@@ -22,11 +22,21 @@ import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.FrameLayout;
 import java.io.File;
 import java.util.Calendar;
 import java.util.Random;
 
+/**
+ * 两个 overlay 分工：
+ *
+ *   视觉窗口 = WebView，永远是完整画布，FLAG_NOT_TOUCHABLE，只负责画。
+ *   触摸窗口 = 透明空 View，大小随实测包围盒变化，只负责收手势。
+ *
+ * 这样做的原因见 git log：把「裁剪窗口」和「平移内容」放进同一个窗口，
+ * 无论用 JS transform 还是负 margin，两条管线都同步不上，切换状态时
+ * 螃蟹会闪一下。现在会随状态改变几何的那个窗口是透明的 —— 没有像素，
+ * 就没有东西可以错位。视觉窗口的尺寸是常量，压根不参与这件事。
+ */
 public class OverlayService extends Service {
     private static final String CHANNEL_ID = "pet_channel";
     private static final int NOTIF_ID = 1001;
@@ -34,24 +44,21 @@ public class OverlayService extends Service {
     private static final long WHISPER_INTERVAL = 3600_000L;
     private static final String PET_DIR = "/sdcard/Download/clawd-pet/";
 
-    /* 画布逻辑尺寸（dp）。必须与 pet.html 里的 CANVAS_W / CANVAS_H 保持一致。
-       WebView 永远是这个尺寸；窗口只是画布上裁出来的一块。
-       窗口没覆盖的地方没有窗口，触摸会直接落到下层应用 —— 这是唯一能做到
-       真穿透的办法（onTouchListener 返回 false 只是 WebView 不处理，
-       事件已被窗口消费，不会漏出去）。 */
+    /* 画布逻辑尺寸（dp），必须与 pet.html 里的 CANVAS_W / CANVAS_H 一致。
+       视觉窗口恒为这个尺寸，永不改变。 */
     private static final int CANVAS_W_DP = 150;
     private static final int CANVAS_H_DP = 185;
 
     private WindowManager wm;
-    private FrameLayout root;
     private WebView webView;
-    private WindowManager.LayoutParams params;
+    private WindowManager.LayoutParams visualParams;
+    private View touchView;
+    private WindowManager.LayoutParams touchParams;
 
-    /* 画布原点在屏幕上的位置。拖拽改的是这个，不是 params.x/y。 */
+    /* 画布原点在屏幕上的位置，拖拽改的是这个 */
     private int canvasX = 20, canvasY = 220;
-    /* 窗口裁剪区，画布坐标系，dp */
-    private int winX = 0, winY = 0, winW = CANVAS_W_DP, winH = CANVAS_H_DP;
-    /* 螃蟹实体范围，画布坐标系，dp。由 pet.html 用 getBBox 实测上报，决定有效点击区。 */
+    /* 螃蟹实体范围，画布坐标系，dp。由 pet.html 用 getBBox 实测上报，
+       直接决定触摸窗口的位置和大小。 */
     private float bodyX = 0, bodyY = 0, bodyW = CANVAS_W_DP, bodyH = CANVAS_H_DP;
     private boolean pendingGeo = false;
 
@@ -60,7 +67,6 @@ public class OverlayService extends Service {
     private long lastTap = 0, touchStart = 0;
     private boolean hasMoved = false;
     private boolean isDragging = false;
-    private boolean isValidTouch = false;
     private Handler mainHandler;
     private BroadcastReceiver stateReceiver;
     private Random random = new Random();
@@ -87,57 +93,50 @@ public class OverlayService extends Service {
 
     // --- JS Bridge ---
     private class PetBridge {
-        /* 旧接口，保留以兼容老 pet.html。窗口尺寸现在由实测包围盒决定。 */
+        /* 旧接口，保留以兼容老 pet.html */
         @JavascriptInterface
         public void requestResize(boolean full) { }
 
-        /* pet.html 每次换 SVG / 气泡开合后调这个上报几何。
-           win* = 窗口该裁到多大；body* = 螃蟹实体在哪，用于命中判定。 */
+        /* pet.html 每次换 SVG / 气泡开合后上报几何。
+           win* 是给上一版裁剪窗口用的，现在视觉窗口不裁剪了，忽略；
+           只用 body*（螃蟹实体范围）来摆触摸窗口。签名保持不变，
+           这样同一份 pet.html 在新旧 APK 上都能跑。 */
         @JavascriptInterface
         public void reportGeo(final float wx, final float wy, final float ww, final float wh,
                               final float bx, final float by, final float bw, final float bh) {
             mainHandler.post(new Runnable() {
-                @Override public void run() { applyGeo(wx, wy, ww, wh, bx, by, bw, bh); }
+                @Override public void run() { applyGeo(bx, by, bw, bh); }
             });
         }
     }
 
-    private void applyGeo(float wx, float wy, float ww, float wh,
-                          float bx, float by, float bw, float bh) {
-        if (webView == null || params == null) return;
-        if (ww < 8 || wh < 8) return;   // 测量异常，保持现状
+    private void applyGeo(float bx, float by, float bw, float bh) {
+        if (bw < 8 || bh < 8) return;   // 测量异常，保持现状
+        if (bx == bodyX && by == bodyY && bw == bodyW && bh == bodyH) return;
         bodyX = bx; bodyY = by; bodyW = bw; bodyH = bh;
-        int nx = Math.round(wx), ny = Math.round(wy);
-        int nw = Math.round(ww), nh = Math.round(wh);
-        if (nx == winX && ny == winY && nw == winW && nh == winH) return;
-        winX = nx; winY = ny; winW = nw; winH = nh;
-        if (isDragging) { pendingGeo = true; return; }   // 拖拽中改窗口会打断手势
-        syncWindow();
+        // 拖拽途中改触摸窗口尺寸有打断手势的风险，推迟到手势结束
+        if (isDragging) { pendingGeo = true; return; }
+        syncTouchWindow();
     }
 
-    /* 裁剪：窗口摆到 画布原点 + 裁剪偏移，同时用负 margin 把 WebView 往反方向挪
-       同样的量。两者在同一次 layout pass 内生效，所以螃蟹在屏幕上的绝对位置
-       不会出现中间态 —— 这是消除闪现的关键，不能改回异步的 JS transform。 */
-    private void syncWindow() {
-        if (root == null || webView == null || params == null) return;
-        params.x = canvasX + dp(winX);
-        params.y = canvasY + dp(winY);
-        params.width = dp(winW);
-        params.height = dp(winH);
-        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) webView.getLayoutParams();
-        lp.leftMargin = -dp(winX);
-        lp.topMargin = -dp(winY);
-        webView.setLayoutParams(lp);
-        try { wm.updateViewLayout(root, params); } catch (Exception e) {}
+    /* 触摸窗口贴着螃蟹本体。它是透明的，所以尺寸怎么变都不会被看见。 */
+    private void syncTouchWindow() {
+        if (touchView == null || touchParams == null) return;
+        touchParams.x = canvasX + dpf(bodyX);
+        touchParams.y = canvasY + dpf(bodyY);
+        touchParams.width = Math.max(1, dpf(bodyW));
+        touchParams.height = Math.max(1, dpf(bodyH));
+        try { wm.updateViewLayout(touchView, touchParams); } catch (Exception e) {}
     }
 
-    /* 拖拽：只挪窗口，不碰尺寸、不碰子 View 布局、不调 JS。
-       WebView 尺寸恒定，CSS 不会重排，所以拖拽是即时的。 */
-    private void moveWindow() {
-        if (root == null || params == null) return;
-        params.x = canvasX + dp(winX);
-        params.y = canvasY + dp(winY);
-        try { wm.updateViewLayout(root, params); } catch (Exception e) {}
+    /* 拖拽：两个窗口一起挪，只改 x/y。视觉窗口尺寸不变 → 不重排不重绘内容。 */
+    private void moveWindows() {
+        if (webView != null && visualParams != null) {
+            visualParams.x = canvasX;
+            visualParams.y = canvasY;
+            try { wm.updateViewLayout(webView, visualParams); } catch (Exception e) {}
+        }
+        syncTouchWindow();
     }
 
     @Override public IBinder onBind(Intent i) { return null; }
@@ -189,16 +188,22 @@ public class OverlayService extends Service {
     private void setupOverlay() {
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return; }
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+        setupVisualWindow();
+        setupTouchWindow();
+    }
 
-        // 先按整块画布开窗，等 pet.html 上报实测几何后再裁剪
-        params = new WindowManager.LayoutParams(
+    /* 视觉窗口：完整画布，不可触摸。尺寸是常量，只有拖拽会改 x/y。 */
+    private void setupVisualWindow() {
+        visualParams = new WindowManager.LayoutParams(
             dp(CANVAS_W_DP), dp(CANVAS_H_DP),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT);
-        params.gravity = Gravity.TOP | Gravity.START;
-        params.x = canvasX; params.y = canvasY;
+        visualParams.gravity = Gravity.TOP | Gravity.START;
+        visualParams.x = canvasX;
+        visualParams.y = canvasY;
 
         webView = new WebView(this);
         webView.setBackgroundColor(0x00000000);
@@ -212,7 +217,7 @@ public class OverlayService extends Service {
         s.setCacheMode(WebSettings.LOAD_NO_CACHE);
         webView.setWebViewClient(new WebViewClient() {
             @Override public void onPageFinished(WebView view, String url) {
-                // 告诉 pet.html 这是支持窗口裁剪的新版本，可以开始实测上报
+                // 通知 pet.html 开始实测上报包围盒
                 js("window.petGeo && petGeo.enable()");
             }
         });
@@ -224,20 +229,28 @@ public class OverlayService extends Service {
         } else {
             webView.loadUrl("file:///android_asset/pet.html");
         }
+        wm.addView(webView, visualParams);
+    }
 
-        final float density = getResources().getDisplayMetrics().density;
-        webView.setOnTouchListener(new View.OnTouchListener() {
+    /* 触摸窗口：透明空 View，边界就是螃蟹边界。
+       它收到的任何事件都必然落在螃蟹上，所以不需要命中判定。 */
+    private void setupTouchWindow() {
+        touchParams = new WindowManager.LayoutParams(
+            dp(CANVAS_W_DP), dp(CANVAS_H_DP),
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT);
+        touchParams.gravity = Gravity.TOP | Gravity.START;
+        touchParams.x = canvasX;
+        touchParams.y = canvasY;
+
+        touchView = new View(this);
+        touchView.setBackgroundColor(0x00000000);
+        touchView.setOnTouchListener(new View.OnTouchListener() {
             @Override public boolean onTouch(View v, MotionEvent e) {
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
-                        // WebView 原点恒等于画布原点，所以局部坐标就是画布坐标
-                        float cx = e.getX() / density;
-                        float cy = e.getY() / density;
-                        if (cx < bodyX || cx > bodyX + bodyW || cy < bodyY || cy > bodyY + bodyH) {
-                            isValidTouch = false;
-                            return false;
-                        }
-                        isValidTouch = true;
                         initialX = canvasX;
                         initialY = canvasY;
                         initialTouchX = e.getRawX();
@@ -247,7 +260,6 @@ public class OverlayService extends Service {
                         isDragging = false;
                         return true;
                     case MotionEvent.ACTION_MOVE:
-                        if (!isValidTouch) return false;
                         int dx = (int)(e.getRawX() - initialTouchX);
                         int dy = (int)(e.getRawY() - initialTouchY);
                         if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
@@ -258,11 +270,10 @@ public class OverlayService extends Service {
                             }
                             canvasX = initialX + dx;
                             canvasY = initialY + dy;
-                            moveWindow();
+                            moveWindows();
                         }
                         return true;
                     case MotionEvent.ACTION_UP:
-                        if (!isValidTouch) return false;
                         long elapsed = System.currentTimeMillis() - touchStart;
                         if (!hasMoved) {
                             if (elapsed > 600) {
@@ -277,23 +288,18 @@ public class OverlayService extends Service {
                             js("window.petEngine && petEngine.onDragEnd()");
                         }
                         isDragging = false;
-                        if (pendingGeo) { pendingGeo = false; syncWindow(); }
+                        if (pendingGeo) { pendingGeo = false; syncTouchWindow(); }
                         return true;
                     case MotionEvent.ACTION_CANCEL:
                         isDragging = false;
-                        if (pendingGeo) { pendingGeo = false; syncWindow(); }
-                        return false;
+                        if (pendingGeo) { pendingGeo = false; syncTouchWindow(); }
+                        return true;
                     default:
                         return false;
                 }
             }
         });
-
-        // root 跟随窗口尺寸并裁剪超出部分；WebView 固定画布尺寸，靠负 margin 偏移
-        root = new FrameLayout(this);
-        root.setBackgroundColor(0x00000000);
-        root.addView(webView, new FrameLayout.LayoutParams(dp(CANVAS_W_DP), dp(CANVAS_H_DP)));
-        wm.addView(root, params);
+        wm.addView(touchView, touchParams);
     }
 
     private void startWhisperRotation() {
@@ -319,6 +325,7 @@ public class OverlayService extends Service {
 
     private void js(String code) { if (webView != null) webView.evaluateJavascript(code, null); }
     private int dp(int d) { return (int)(d * getResources().getDisplayMetrics().density + 0.5f); }
+    private int dpf(float d) { return Math.round(d * getResources().getDisplayMetrics().density); }
 
     private Notification buildNotification(String text) {
         return new Notification.Builder(this, CHANNEL_ID)
@@ -332,8 +339,12 @@ public class OverlayService extends Service {
     @Override public void onDestroy() {
         if (whisperRunnable != null) mainHandler.removeCallbacks(whisperRunnable);
         if (stateReceiver != null) { unregisterReceiver(stateReceiver); stateReceiver = null; }
-        if (root != null) { try { wm.removeView(root); } catch (Exception e) {} root = null; }
-        if (webView != null) { webView.destroy(); webView = null; }
+        if (touchView != null) { try { wm.removeView(touchView); } catch (Exception e) {} touchView = null; }
+        if (webView != null) {
+            try { wm.removeView(webView); } catch (Exception e) {}
+            webView.destroy();
+            webView = null;
+        }
         super.onDestroy();
     }
 }

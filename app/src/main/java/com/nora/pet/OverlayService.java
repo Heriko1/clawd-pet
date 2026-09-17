@@ -34,7 +34,11 @@ import java.util.Calendar;
 import java.util.Random;
 
 /**
- * v3.4 — dizzy stays visible at landing spot
+ * v3.5 — physics bounce fling
+ *
+ * Fling now uses real physics: initial velocity from swipe, gravity pulls
+ * crab down, walls bounce with 55% energy retention. Crab settles at
+ * bottom of screen, stays dizzy 2.5s, then crawls back to origin.
  */
 public class OverlayService extends Service {
     private static final String CHANNEL_ID = "pet_channel";
@@ -68,8 +72,8 @@ public class OverlayService extends Service {
     /* --- Fling --- */
     private VelocityTracker velocityTracker;
     private ValueAnimator flingAnimator;
-    private Runnable flingReturnRunnable;
     private Runnable flingDizzyRunnable;
+    private Runnable flingReturnRunnable;
     private boolean flingCancelled = false;
     private int preFlingX, preFlingY;
     private int screenW, screenH;
@@ -335,7 +339,7 @@ public class OverlayService extends Service {
         wm.addView(touchView, touchParams);
     }
 
-    /* ---------- Fling ---------- */
+    /* ---------- Fling (physics bounce) ---------- */
 
     private void startFling(float vx, float vy) {
         flingCancelled = false;
@@ -343,35 +347,51 @@ public class OverlayService extends Service {
         preFlingY = canvasY;
         js("window.petEngine && petEngine.onFling()");
 
-        float speed = (float) Math.sqrt(vx * vx + vy * vy);
-        float nx = vx / speed, ny = vy / speed;
-        int dist = (int)(Math.min(screenW, screenH) * 0.25f);
-        int targetX = canvasX + (int)(nx * dist);
-        int targetY = canvasY + (int)(ny * dist);
-        int halfW = dp(CANVAS_W_DP / 2);
-        int halfH = dp(CANVAS_H_DP / 2);
-        targetX = Math.max(-halfW, Math.min(screenW - halfW, targetX));
-        targetY = Math.max(0, Math.min(screenH - halfH, targetY));
-
-        final int sx = canvasX, sy = canvasY;
-        final int ex = targetX, ey = targetY;
+        final float[] vel = {vx * 0.4f, vy * 0.4f};
+        final float GRAVITY = 2500f;
+        final float BOUNCE_FACTOR = 0.55f;
+        final float STOP_SPEED = 100f;
+        final int halfW = dp(CANVAS_W_DP / 2);
+        final int minX = -halfW;
+        final int maxX = screenW - halfW;
+        final int minY = 0;
+        final int maxY = screenH - dp(CANVAS_H_DP / 2);
+        final long[] lastNano = {System.nanoTime()};
+        final boolean[] settled = {false};
 
         flingAnimator = ValueAnimator.ofFloat(0f, 1f);
-        flingAnimator.setDuration(350);
-        flingAnimator.setInterpolator(new DecelerateInterpolator(2f));
+        flingAnimator.setDuration(5000);
+        flingAnimator.setInterpolator(new LinearInterpolator());
         flingAnimator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
             @Override public void onAnimationUpdate(ValueAnimator a) {
-                float t = (float) a.getAnimatedValue();
-                canvasX = sx + (int)((ex - sx) * t);
-                canvasY = sy + (int)((ey - sy) * t);
+                if (settled[0]) return;
+                long now = System.nanoTime();
+                float dt = (now - lastNano[0]) / 1_000_000_000f;
+                lastNano[0] = now;
+                if (dt > 0.05f) dt = 0.05f;
+
+                vel[1] += GRAVITY * dt;
+                canvasX += (int)(vel[0] * dt);
+                canvasY += (int)(vel[1] * dt);
+
+                if (canvasX <= minX) { canvasX = minX; vel[0] = Math.abs(vel[0]) * BOUNCE_FACTOR; }
+                else if (canvasX >= maxX) { canvasX = maxX; vel[0] = -Math.abs(vel[0]) * BOUNCE_FACTOR; }
+                if (canvasY <= minY) { canvasY = minY; vel[1] = Math.abs(vel[1]) * BOUNCE_FACTOR; }
+                else if (canvasY >= maxY) { canvasY = maxY; vel[1] = -Math.abs(vel[1]) * BOUNCE_FACTOR; }
+
                 moveWindows();
+
+                float speed = (float) Math.sqrt(vel[0] * vel[0] + vel[1] * vel[1]);
+                if (speed < STOP_SPEED && canvasY >= maxY - dp(10)) {
+                    settled[0] = true;
+                    a.cancel();
+                }
             }
         });
         flingAnimator.addListener(new AnimatorListenerAdapter() {
             @Override public void onAnimationEnd(Animator a) {
                 flingAnimator = null;
                 if (flingCancelled) return;
-                // Stay dizzy at landing spot, then crawl back
                 flingDizzyRunnable = new Runnable() {
                     @Override public void run() {
                         flingDizzyRunnable = null;

@@ -34,7 +34,7 @@ import java.util.Calendar;
 import java.util.Random;
 
 /**
- * v3.3 — longer dizzy pause before crawl back
+ * v3.4 — dizzy stays visible at landing spot
  */
 public class OverlayService extends Service {
     private static final String CHANNEL_ID = "pet_channel";
@@ -69,10 +69,12 @@ public class OverlayService extends Service {
     private VelocityTracker velocityTracker;
     private ValueAnimator flingAnimator;
     private Runnable flingReturnRunnable;
+    private Runnable flingDizzyRunnable;
     private boolean flingCancelled = false;
     private int preFlingX, preFlingY;
     private int screenW, screenH;
     private static final float FLING_THRESHOLD_PX = 2000f;
+    private static final long FLING_DIZZY_MS = 2500L;
 
     /* --- Patrol --- */
     private ValueAnimator patrolAnimator;
@@ -367,7 +369,16 @@ public class OverlayService extends Service {
         });
         flingAnimator.addListener(new AnimatorListenerAdapter() {
             @Override public void onAnimationEnd(Animator a) {
-                if (!flingCancelled) flingReturn();
+                flingAnimator = null;
+                if (flingCancelled) return;
+                // Stay dizzy at landing spot, then crawl back
+                flingDizzyRunnable = new Runnable() {
+                    @Override public void run() {
+                        flingDizzyRunnable = null;
+                        if (!flingCancelled) flingReturn();
+                    }
+                };
+                mainHandler.postDelayed(flingDizzyRunnable, FLING_DIZZY_MS);
             }
         });
         flingAnimator.start();
@@ -377,38 +388,35 @@ public class OverlayService extends Service {
         js("window.petEngine && petEngine.onFlingReturn()");
         final int sx = canvasX, sy = canvasY;
         final int ex = preFlingX, ey = preFlingY;
-        flingReturnRunnable = new Runnable() {
-            @Override public void run() {
-                flingReturnRunnable = null;
-                if (flingCancelled) return;
-                flingAnimator = ValueAnimator.ofFloat(0f, 1f);
-                flingAnimator.setDuration(1500);
-                flingAnimator.setInterpolator(new DecelerateInterpolator(1.5f));
-                flingAnimator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
-                    @Override public void onAnimationUpdate(ValueAnimator a) {
-                        float t = (float) a.getAnimatedValue();
-                        canvasX = sx + (int)((ex - sx) * t);
-                        canvasY = sy + (int)((ey - sy) * t);
-                        moveWindows();
-                    }
-                });
-                flingAnimator.addListener(new AnimatorListenerAdapter() {
-                    @Override public void onAnimationEnd(Animator a) {
-                        if (!flingCancelled) {
-                            flingAnimator = null;
-                            js("window.petEngine && petEngine.onFlingDone()");
-                        }
-                    }
-                });
-                flingAnimator.start();
+        flingAnimator = ValueAnimator.ofFloat(0f, 1f);
+        flingAnimator.setDuration(1500);
+        flingAnimator.setInterpolator(new DecelerateInterpolator(1.5f));
+        flingAnimator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+            @Override public void onAnimationUpdate(ValueAnimator a) {
+                float t = (float) a.getAnimatedValue();
+                canvasX = sx + (int)((ex - sx) * t);
+                canvasY = sy + (int)((ey - sy) * t);
+                moveWindows();
             }
-        };
-        mainHandler.postDelayed(flingReturnRunnable, 2500);
+        });
+        flingAnimator.addListener(new AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(Animator a) {
+                if (!flingCancelled) {
+                    flingAnimator = null;
+                    js("window.petEngine && petEngine.onFlingDone()");
+                }
+            }
+        });
+        flingAnimator.start();
     }
 
     private void cancelFling() {
         flingCancelled = true;
         if (flingAnimator != null) { flingAnimator.cancel(); flingAnimator = null; }
+        if (flingDizzyRunnable != null) {
+            mainHandler.removeCallbacks(flingDizzyRunnable);
+            flingDizzyRunnable = null;
+        }
         if (flingReturnRunnable != null) {
             mainHandler.removeCallbacks(flingReturnRunnable);
             flingReturnRunnable = null;

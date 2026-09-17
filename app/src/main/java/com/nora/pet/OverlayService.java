@@ -34,11 +34,7 @@ import java.util.Calendar;
 import java.util.Random;
 
 /**
- * v3.2 — fix fling distance & boundary
- *
- * 两个 overlay 分工：
- *   视觉窗口 = WebView，永远是完整画布，FLAG_NOT_TOUCHABLE，只负责画。
- *   触摸窗口 = 透明空 View，大小随实测包围盒变化，只负责收手势。
+ * v3.3 — longer dizzy pause before crawl back
  */
 public class OverlayService extends Service {
     private static final String CHANNEL_ID = "pet_channel";
@@ -407,7 +403,7 @@ public class OverlayService extends Service {
                 flingAnimator.start();
             }
         };
-        mainHandler.postDelayed(flingReturnRunnable, 800);
+        mainHandler.postDelayed(flingReturnRunnable, 2500);
     }
 
     private void cancelFling() {

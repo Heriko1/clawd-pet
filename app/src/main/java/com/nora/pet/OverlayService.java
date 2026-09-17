@@ -1,5 +1,8 @@
 package com.nora.pet;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -14,10 +17,14 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.provider.Settings;
+import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.VelocityTracker;
 import android.view.View;
 import android.view.WindowManager;
+import android.view.animation.DecelerateInterpolator;
+import android.view.animation.LinearInterpolator;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -27,27 +34,11 @@ import java.util.Calendar;
 import java.util.Random;
 
 /**
- * 两个 overlay 分工：
+ * v3.1 — 甩飞回弹 + 自动巡逻 + 充电感知
  *
+ * 两个 overlay 分工：
  *   视觉窗口 = WebView，永远是完整画布，FLAG_NOT_TOUCHABLE，只负责画。
  *   触摸窗口 = 透明空 View，大小随实测包围盒变化，只负责收手势。
- *
- * 为什么是这个结构，见 git log。简述四次尝试：
- *
- *   v1 裁剪窗口 + JS transform 平移内容 —— 闪现。evaluateJavascript
- *      异步，内容偏移落后窗口一两帧。
- *   v2 裁剪窗口 + 负 margin 平移 WebView —— 闪现更明显。setLayoutParams
- *      触发 WebView 重新布局与光栅化，比 CSS 合成层 transform 更慢。
- *      结论：窗口几何与内容偏移是两条管线，无法同步。
- *   v3 本方案 —— 让会变几何的窗口没有像素。不闪现、判定准、真穿透，
- *      代价是 FLAG_NOT_TOUCHABLE 触发系统压暗，alpha 被限到 0.8。
- *   v4 单窗口 + touchable region（反射 @hide 接口）—— 理论上四项全中，
- *      但 Android 16 已拦截该接口，实机降级为不穿透，不可用。
- *
- * 半透明是系统策略：dumpsys 显示 touchOcclusionMode=USE_OPACITY，
- * maximum_obscuring_opacity_for_touch 默认 0.8。vivo 的实现是压暗
- * surface 而非拦截触摸。应用侧无法绕过；只能由使用者在系统层把该阈值
- * 调到 1.0（全局设置，会削弱对恶意悬浮窗的防护）。
  */
 public class OverlayService extends Service {
     private static final String CHANNEL_ID = "pet_channel";
@@ -55,9 +46,6 @@ public class OverlayService extends Service {
     public static final String ACTION_STATE = "com.nora.pet.STATE_CHANGE";
     private static final long WHISPER_INTERVAL = 3600_000L;
     private static final String PET_DIR = "/sdcard/Download/clawd-pet/";
-
-    /* 画布逻辑尺寸（dp），必须与 pet.html 里的 CANVAS_W / CANVAS_H 一致。
-       视觉窗口恒为这个尺寸，永不改变。 */
     private static final int CANVAS_W_DP = 150;
     private static final int CANVAS_H_DP = 185;
 
@@ -67,10 +55,7 @@ public class OverlayService extends Service {
     private View touchView;
     private WindowManager.LayoutParams touchParams;
 
-    /* 画布原点在屏幕上的位置，拖拽改的是这个 */
     private int canvasX = 20, canvasY = 220;
-    /* 螃蟹实体范围，画布坐标系，dp。由 pet.html 用 getBBox 实测上报，
-       直接决定触摸窗口的位置和大小。 */
     private float bodyX = 0, bodyY = 0, bodyW = CANVAS_W_DP, bodyH = CANVAS_H_DP;
     private boolean pendingGeo = false;
 
@@ -83,6 +68,27 @@ public class OverlayService extends Service {
     private BroadcastReceiver stateReceiver;
     private Random random = new Random();
     private Runnable whisperRunnable;
+
+    /* --- Fling --- */
+    private VelocityTracker velocityTracker;
+    private ValueAnimator flingAnimator;
+    private Runnable flingReturnRunnable;
+    private boolean flingCancelled = false;
+    private int preFlingX, preFlingY;
+    private int screenW, screenH;
+    private static final float FLING_THRESHOLD_PX = 2000f;
+
+    /* --- Patrol --- */
+    private ValueAnimator patrolAnimator;
+    private long lastTouchTime = System.currentTimeMillis();
+    private Runnable patrolRunnable;
+    private boolean isPatrolling = false;
+    private static final long PATROL_IDLE_MS = 180_000L;
+    private static final long PATROL_INTERVAL_MS = 35_000L;
+    private static final long PATROL_MAX_IDLE_MS = 1200_000L;
+
+    /* --- Battery --- */
+    private BroadcastReceiver batteryReceiver;
 
     private static final String[] GENERAL_WHISPERS = {
         "\u5728\u770b\u4f60\u2026", "\u2026", "(*\u00b4-`)", "\u60f3\u6233\u4e00\u4e0b\u5417",
@@ -105,14 +111,9 @@ public class OverlayService extends Service {
 
     // --- JS Bridge ---
     private class PetBridge {
-        /* 旧接口，保留以兼容老 pet.html */
         @JavascriptInterface
         public void requestResize(boolean full) { }
 
-        /* pet.html 每次换 SVG / 气泡开合后上报几何。
-           win* 是早期裁剪窗口方案的参数，视觉窗口现在不裁剪，忽略；
-           只用 body*（螃蟹实体范围）来摆触摸窗口。签名保持 8 参不变，
-           同一份 pet.html 在新旧 APK 上都能跑。 */
         @JavascriptInterface
         public void reportGeo(final float wx, final float wy, final float ww, final float wh,
                               final float bx, final float by, final float bw, final float bh) {
@@ -123,16 +124,13 @@ public class OverlayService extends Service {
     }
 
     private void applyGeo(float bx, float by, float bw, float bh) {
-        if (bw < 8 || bh < 8) return;   // 测量异常，保持现状
+        if (bw < 8 || bh < 8) return;
         if (bx == bodyX && by == bodyY && bw == bodyW && bh == bodyH) return;
         bodyX = bx; bodyY = by; bodyW = bw; bodyH = bh;
-        // 拖拽途中改触摸窗口尺寸有打断手势的风险，推迟到手势结束
         if (isDragging) { pendingGeo = true; return; }
         syncTouchWindow();
     }
 
-    /* 触摸窗口贴着螃蟹本体。它是透明的，所以尺寸怎么变都不会被看见，
-       也就不可能出现视觉上的错位。 */
     private void syncTouchWindow() {
         if (touchView == null || touchParams == null) return;
         touchParams.x = canvasX + dpf(bodyX);
@@ -142,7 +140,6 @@ public class OverlayService extends Service {
         try { wm.updateViewLayout(touchView, touchParams); } catch (Exception e) {}
     }
 
-    /* 拖拽：两个窗口一起挪，只改 x/y。视觉窗口尺寸不变 → 不重排不重绘内容。 */
     private void moveWindows() {
         if (webView != null && visualParams != null) {
             visualParams.x = canvasX;
@@ -157,13 +154,18 @@ public class OverlayService extends Service {
     @Override public void onCreate() {
         super.onCreate();
         mainHandler = new Handler(Looper.getMainLooper());
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        screenW = dm.widthPixels;
+        screenH = dm.heightPixels;
         NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "Clawd Pet", NotificationManager.IMPORTANCE_LOW);
         ch.setShowBadge(false);
         ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(ch);
         startForeground(NOTIF_ID, buildNotification(getWhisper()));
         setupOverlay();
         registerStateReceiver();
+        registerBatteryReceiver();
         startWhisperRotation();
+        startPatrolTimer();
     }
 
     @Override public int onStartCommand(Intent i, int f, int s) { return START_STICKY; }
@@ -175,6 +177,7 @@ public class OverlayService extends Service {
                 final String text = intent.getStringExtra("text");
                 if (webView != null) {
                     if (state != null) {
+                        cancelPatrol();
                         final String s = state;
                         mainHandler.post(new Runnable() {
                             @Override public void run() { js("show('" + s + "')"); }
@@ -205,9 +208,6 @@ public class OverlayService extends Service {
         setupTouchWindow();
     }
 
-    /* 视觉窗口：完整画布，不可触摸。尺寸是常量，只有拖拽会改 x/y。
-       FLAG_NOT_TOUCHABLE 是穿透的来源，也是 alpha 被压到 0.8 的来源，
-       两者绑在一起，无法只要一个。 */
     private void setupVisualWindow() {
         visualParams = new WindowManager.LayoutParams(
             dp(CANVAS_W_DP), dp(CANVAS_H_DP),
@@ -228,11 +228,9 @@ public class OverlayService extends Service {
         s.setAllowFileAccess(true);
         s.setAllowFileAccessFromFileURLs(true);
         s.setAllowUniversalAccessFromFileURLs(true);
-        // Disable cache to always load fresh pet.html
         s.setCacheMode(WebSettings.LOAD_NO_CACHE);
         webView.setWebViewClient(new WebViewClient() {
             @Override public void onPageFinished(WebView view, String url) {
-                // 通知 pet.html 开始实测上报包围盒
                 js("window.petGeo && petGeo.enable()");
             }
         });
@@ -247,8 +245,6 @@ public class OverlayService extends Service {
         wm.addView(webView, visualParams);
     }
 
-    /* 触摸窗口：透明空 View，边界就是螃蟹边界。
-       它收到的任何事件都必然落在螃蟹上，所以不需要命中判定。 */
     private void setupTouchWindow() {
         touchParams = new WindowManager.LayoutParams(
             dp(CANVAS_W_DP), dp(CANVAS_H_DP),
@@ -266,6 +262,15 @@ public class OverlayService extends Service {
             @Override public boolean onTouch(View v, MotionEvent e) {
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
+                        cancelFling();
+                        cancelPatrol();
+                        lastTouchTime = System.currentTimeMillis();
+                        if (velocityTracker == null) {
+                            velocityTracker = VelocityTracker.obtain();
+                        } else {
+                            velocityTracker.clear();
+                        }
+                        velocityTracker.addMovement(e);
                         initialX = canvasX;
                         initialY = canvasY;
                         initialTouchX = e.getRawX();
@@ -275,6 +280,7 @@ public class OverlayService extends Service {
                         isDragging = false;
                         return true;
                     case MotionEvent.ACTION_MOVE:
+                        if (velocityTracker != null) velocityTracker.addMovement(e);
                         int dx = (int)(e.getRawX() - initialTouchX);
                         int dy = (int)(e.getRawY() - initialTouchY);
                         if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
@@ -289,6 +295,7 @@ public class OverlayService extends Service {
                         }
                         return true;
                     case MotionEvent.ACTION_UP:
+                        lastTouchTime = System.currentTimeMillis();
                         long elapsed = System.currentTimeMillis() - touchStart;
                         if (!hasMoved) {
                             if (elapsed > 600) {
@@ -300,7 +307,20 @@ public class OverlayService extends Service {
                                 js("window.petEngine && petEngine.onTap()");
                             }
                         } else if (isDragging) {
-                            js("window.petEngine && petEngine.onDragEnd()");
+                            boolean flung = false;
+                            if (velocityTracker != null) {
+                                velocityTracker.computeCurrentVelocity(1000);
+                                float vx = velocityTracker.getXVelocity();
+                                float vy = velocityTracker.getYVelocity();
+                                float speed = (float) Math.sqrt(vx * vx + vy * vy);
+                                if (speed > FLING_THRESHOLD_PX) {
+                                    startFling(vx, vy);
+                                    flung = true;
+                                }
+                            }
+                            if (!flung) {
+                                js("window.petEngine && petEngine.onDragEnd()");
+                            }
                         }
                         isDragging = false;
                         if (pendingGeo) { pendingGeo = false; syncTouchWindow(); }
@@ -316,6 +336,176 @@ public class OverlayService extends Service {
         });
         wm.addView(touchView, touchParams);
     }
+
+    /* ---------- Fling ---------- */
+
+    private void startFling(float vx, float vy) {
+        flingCancelled = false;
+        preFlingX = canvasX;
+        preFlingY = canvasY;
+        js("window.petEngine && petEngine.onFling()");
+
+        float speed = (float) Math.sqrt(vx * vx + vy * vy);
+        float nx = vx / speed, ny = vy / speed;
+        int dist = (int)(Math.max(screenW, screenH) * 0.6f);
+        int targetX = canvasX + (int)(nx * dist);
+        int targetY = canvasY + (int)(ny * dist);
+        targetX = Math.max(-dp(CANVAS_W_DP), Math.min(screenW, targetX));
+        targetY = Math.max(-dp(CANVAS_H_DP), Math.min(screenH, targetY));
+
+        final int sx = canvasX, sy = canvasY;
+        final int ex = targetX, ey = targetY;
+
+        flingAnimator = ValueAnimator.ofFloat(0f, 1f);
+        flingAnimator.setDuration(350);
+        flingAnimator.setInterpolator(new DecelerateInterpolator(2f));
+        flingAnimator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+            @Override public void onAnimationUpdate(ValueAnimator a) {
+                float t = (float) a.getAnimatedValue();
+                canvasX = sx + (int)((ex - sx) * t);
+                canvasY = sy + (int)((ey - sy) * t);
+                moveWindows();
+            }
+        });
+        flingAnimator.addListener(new AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(Animator a) {
+                if (!flingCancelled) flingReturn();
+            }
+        });
+        flingAnimator.start();
+    }
+
+    private void flingReturn() {
+        js("window.petEngine && petEngine.onFlingReturn()");
+        final int sx = canvasX, sy = canvasY;
+        final int ex = preFlingX, ey = preFlingY;
+        flingReturnRunnable = new Runnable() {
+            @Override public void run() {
+                flingReturnRunnable = null;
+                if (flingCancelled) return;
+                flingAnimator = ValueAnimator.ofFloat(0f, 1f);
+                flingAnimator.setDuration(1500);
+                flingAnimator.setInterpolator(new DecelerateInterpolator(1.5f));
+                flingAnimator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                    @Override public void onAnimationUpdate(ValueAnimator a) {
+                        float t = (float) a.getAnimatedValue();
+                        canvasX = sx + (int)((ex - sx) * t);
+                        canvasY = sy + (int)((ey - sy) * t);
+                        moveWindows();
+                    }
+                });
+                flingAnimator.addListener(new AnimatorListenerAdapter() {
+                    @Override public void onAnimationEnd(Animator a) {
+                        if (!flingCancelled) {
+                            flingAnimator = null;
+                            js("window.petEngine && petEngine.onFlingDone()");
+                        }
+                    }
+                });
+                flingAnimator.start();
+            }
+        };
+        mainHandler.postDelayed(flingReturnRunnable, 800);
+    }
+
+    private void cancelFling() {
+        flingCancelled = true;
+        if (flingAnimator != null) { flingAnimator.cancel(); flingAnimator = null; }
+        if (flingReturnRunnable != null) {
+            mainHandler.removeCallbacks(flingReturnRunnable);
+            flingReturnRunnable = null;
+        }
+    }
+
+    /* ---------- Patrol ---------- */
+
+    private void startPatrolTimer() {
+        patrolRunnable = new Runnable() {
+            @Override public void run() {
+                long idle = System.currentTimeMillis() - lastTouchTime;
+                if (idle >= PATROL_IDLE_MS && idle < PATROL_MAX_IDLE_MS
+                        && !isDragging && flingAnimator == null && !isPatrolling) {
+                    doPatrolStep();
+                }
+                mainHandler.postDelayed(this, PATROL_INTERVAL_MS);
+            }
+        };
+        mainHandler.postDelayed(patrolRunnable, PATROL_INTERVAL_MS);
+    }
+
+    private void doPatrolStep() {
+        int range = dp(60);
+        int targetX = canvasX + random.nextInt(range * 2 + 1) - range;
+        int targetY = canvasY + random.nextInt(range * 2 + 1) - range;
+        targetX = Math.max(0, Math.min(screenW - dp(CANVAS_W_DP / 2), targetX));
+        targetY = Math.max(dp(40), Math.min(screenH - dp(CANVAS_H_DP), targetY));
+        int ddx = targetX - canvasX, ddy = targetY - canvasY;
+        if (Math.sqrt(ddx * ddx + ddy * ddy) < dp(15)) return;
+
+        final int sx = canvasX, sy = canvasY, ex = targetX, ey = targetY;
+        isPatrolling = true;
+        js("show('crabwalk')");
+        js("resetLonely()");
+
+        patrolAnimator = ValueAnimator.ofFloat(0f, 1f);
+        patrolAnimator.setDuration(2500 + random.nextInt(2000));
+        patrolAnimator.setInterpolator(new LinearInterpolator());
+        patrolAnimator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+            @Override public void onAnimationUpdate(ValueAnimator a) {
+                float t = (float) a.getAnimatedValue();
+                canvasX = sx + (int)((ex - sx) * t);
+                canvasY = sy + (int)((ey - sy) * t);
+                moveWindows();
+            }
+        });
+        patrolAnimator.addListener(new AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(Animator a) {
+                isPatrolling = false;
+                patrolAnimator = null;
+                js("show('idle')");
+            }
+        });
+        patrolAnimator.start();
+    }
+
+    private void cancelPatrol() {
+        isPatrolling = false;
+        if (patrolAnimator != null) { patrolAnimator.cancel(); patrolAnimator = null; }
+    }
+
+    /* ---------- Battery ---------- */
+
+    private void registerBatteryReceiver() {
+        batteryReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context ctx, final Intent intent) {
+                final String action = intent.getAction();
+                mainHandler.post(new Runnable() {
+                    @Override public void run() {
+                        if (Intent.ACTION_POWER_CONNECTED.equals(action)) {
+                            js("show('happy')");
+                            js("showBubble('\u5145\u7535\u4e2d~', 3000, 'happy')");
+                        } else if (Intent.ACTION_POWER_DISCONNECTED.equals(action)) {
+                            js("showBubble('\u7535\u62d4\u4e86\u2026', 2000)");
+                        } else if (Intent.ACTION_BATTERY_LOW.equals(action)) {
+                            js("show('low-battery')");
+                            js("showBubble('\u5feb\u6ca1\u7535\u4e86\u2026', 5000, 'whisper')");
+                        }
+                    }
+                });
+            }
+        };
+        IntentFilter f = new IntentFilter();
+        f.addAction(Intent.ACTION_POWER_CONNECTED);
+        f.addAction(Intent.ACTION_POWER_DISCONNECTED);
+        f.addAction(Intent.ACTION_BATTERY_LOW);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(batteryReceiver, f, Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(batteryReceiver, f);
+        }
+    }
+
+    /* ---------- Whispers ---------- */
 
     private void startWhisperRotation() {
         whisperRunnable = new Runnable() {
@@ -338,6 +528,8 @@ public class OverlayService extends Service {
         return pool[random.nextInt(pool.length)];
     }
 
+    /* ---------- Helpers ---------- */
+
     private void js(String code) { if (webView != null) webView.evaluateJavascript(code, null); }
     private int dp(int d) { return (int)(d * getResources().getDisplayMetrics().density + 0.5f); }
     private int dpf(float d) { return Math.round(d * getResources().getDisplayMetrics().density); }
@@ -352,8 +544,19 @@ public class OverlayService extends Service {
     }
 
     @Override public void onDestroy() {
+        if (patrolRunnable != null) mainHandler.removeCallbacks(patrolRunnable);
+        cancelFling();
+        cancelPatrol();
+        if (velocityTracker != null) { velocityTracker.recycle(); velocityTracker = null; }
+        if (batteryReceiver != null) {
+            try { unregisterReceiver(batteryReceiver); } catch (Exception e) {}
+            batteryReceiver = null;
+        }
         if (whisperRunnable != null) mainHandler.removeCallbacks(whisperRunnable);
-        if (stateReceiver != null) { unregisterReceiver(stateReceiver); stateReceiver = null; }
+        if (stateReceiver != null) {
+            try { unregisterReceiver(stateReceiver); } catch (Exception e) {}
+            stateReceiver = null;
+        }
         if (touchView != null) { try { wm.removeView(touchView); } catch (Exception e) {} touchView = null; }
         if (webView != null) {
             try { wm.removeView(webView); } catch (Exception e) {}

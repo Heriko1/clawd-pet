@@ -34,7 +34,7 @@ import java.util.Calendar;
 import java.util.Random;
 
 /**
- * v3.1 — 甩飞回弹 + 自动巡逻 + 充电感知
+ * v3.2 — fix fling distance & boundary
  *
  * 两个 overlay 分工：
  *   视觉窗口 = WebView，永远是完整画布，FLAG_NOT_TOUCHABLE，只负责画。
@@ -347,11 +347,13 @@ public class OverlayService extends Service {
 
         float speed = (float) Math.sqrt(vx * vx + vy * vy);
         float nx = vx / speed, ny = vy / speed;
-        int dist = (int)(Math.max(screenW, screenH) * 0.6f);
+        int dist = (int)(Math.min(screenW, screenH) * 0.25f);
         int targetX = canvasX + (int)(nx * dist);
         int targetY = canvasY + (int)(ny * dist);
-        targetX = Math.max(-dp(CANVAS_W_DP), Math.min(screenW, targetX));
-        targetY = Math.max(-dp(CANVAS_H_DP), Math.min(screenH, targetY));
+        int halfW = dp(CANVAS_W_DP / 2);
+        int halfH = dp(CANVAS_H_DP / 2);
+        targetX = Math.max(-halfW, Math.min(screenW - halfW, targetX));
+        targetY = Math.max(0, Math.min(screenH - halfH, targetY));
 
         final int sx = canvasX, sy = canvasY;
         final int ex = targetX, ey = targetY;

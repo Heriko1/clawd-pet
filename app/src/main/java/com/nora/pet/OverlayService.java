@@ -355,7 +355,7 @@ public class OverlayService extends Service {
         final int minX = -halfW;
         final int maxX = screenW - halfW;
         final int minY = 0;
-        final int maxY = screenH - dp(CANVAS_H_DP / 2);
+        final int maxY = screenH - dp(CANVAS_H_DP);
         final long[] lastNano = {System.nanoTime()};
         final boolean[] settled = {false};
 
